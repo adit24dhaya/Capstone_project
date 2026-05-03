@@ -7,6 +7,7 @@ data/
 
 # Generated Kaggle/local outputs
 kaggle_output/
+kaggle_logs/
 working/
 runs/
 vis_predictions/
