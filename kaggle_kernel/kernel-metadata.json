@@ -1,0 +1,15 @@
+{
+  "id": "aditya2402/project",
+  "title": "project",
+  "code_file": "project.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "aditya2402/pcb-dataset"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}
