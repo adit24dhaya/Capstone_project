@@ -27,6 +27,23 @@ The notebook uses the Kaggle dataset:
 aditya2402/pcb-dataset
 ```
 
+It also downloads DsPCBSD+ from Figshare during the Kaggle run when internet is enabled:
+
+```text
+DOI: 10.6084/m9.figshare.24970329.v1
+File: DsPCBSD+.zip
+```
+
+DsPCBSD+ is merged in overlap mode so it strengthens the five classes that match the current six-class project taxonomy:
+
+- `SH` -> `Short`
+- `SP` -> `Spur`
+- `SC` -> `Spurious_copper`
+- `OP` -> `Open_circuit`
+- `MB` -> `Mouse_bite`
+
+The remaining DsPCBSD+ categories are skipped by default because they do not directly match the proposal's current classes. The original Kaggle PCB dataset still provides the `Missing_hole` class.
+
 Local dataset downloads are intentionally ignored by git because they are large.
 
 ## Kaggle Outputs

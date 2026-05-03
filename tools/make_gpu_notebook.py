@@ -44,11 +44,14 @@ else:
         """
 from pathlib import Path
 from collections import Counter
+import hashlib
 import json
 import random
 import shutil
 import time
+import urllib.request
 import xml.etree.ElementTree as ET
+import zipfile
 
 import cv2
 import matplotlib.pyplot as plt
@@ -66,6 +69,12 @@ IMG_SIZE = 640
 BATCH = 16
 RUN_RTDETR_BENCHMARK = False
 RUN_TENSORRT_EXPORT = False
+USE_DSPCBSD_PLUS = True
+MAX_DSPCBSD_PLUS_IMAGES = None
+
+DSPCBSD_PLUS_URL = "https://ndownloader.figshare.com/files/44069552"
+DSPCBSD_PLUS_MD5 = "508334b65bdaea7336f4c1b5d5a80a81"
+DSPCBSD_PLUS_DOI = "10.6084/m9.figshare.24970329.v1"
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -81,7 +90,17 @@ CLASSES = [
 
 CLASS_TO_ID = {name.lower(): i for i, name in enumerate(CLASSES)}
 
+DSPCBSD_YOLO_CODES = ["SH", "SP", "SC", "OP", "MB", "HB", "CS", "CFO", "BMFO"]
+DSPCBSD_TO_PROJECT_CLASS = {
+    "SH": "Short",
+    "SP": "Spur",
+    "SC": "Spurious_copper",
+    "OP": "Open_circuit",
+    "MB": "Mouse_bite",
+}
+
 WORK_DIR = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path("working")
+CACHE_DIR = Path("/kaggle/temp") if Path("/kaggle/temp").exists() else WORK_DIR / "external"
 YOLO_ROOT = WORK_DIR / "YOLO_PCB"
 DATA_YAML = YOLO_ROOT / "data.yaml"
 RUN_DIR = WORK_DIR / "runs/detect/train"
@@ -124,6 +143,146 @@ def find_dataset_root():
 DATASET_ROOT = find_dataset_root()
 print("Dataset root:", DATASET_ROOT)
 print("Image folders:", sorted(p.name for p in (DATASET_ROOT / "images").iterdir() if p.is_dir()))
+"""
+    ),
+    code_cell(
+        """
+def file_md5(path: Path):
+    digest = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def find_dspcbsd_yolo_root(extract_root: Path):
+    candidates = [extract_root / "Data_YOLO"]
+    candidates.extend(p for p in extract_root.rglob("Data_YOLO") if p.is_dir())
+    for candidate in candidates:
+        if (candidate / "images").exists() and (candidate / "labels").exists():
+            return candidate
+    return None
+
+
+def prepare_dspcbsd_plus():
+    if not USE_DSPCBSD_PLUS:
+        print("DsPCBSD+ merge disabled.")
+        return None
+
+    cache_root = CACHE_DIR / "DsPCBSD_plus"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    yolo_root = find_dspcbsd_yolo_root(cache_root)
+    if yolo_root is not None:
+        print("DsPCBSD+ already extracted:", yolo_root)
+        return yolo_root
+
+    zip_path = cache_root / "DsPCBSD_plus.zip"
+    if zip_path.exists() and file_md5(zip_path) != DSPCBSD_PLUS_MD5:
+        print("Existing DsPCBSD+ zip checksum mismatch; downloading a fresh copy.")
+        zip_path.unlink()
+
+    if not zip_path.exists():
+        print(f"Downloading DsPCBSD+ from Figshare DOI {DSPCBSD_PLUS_DOI} ...")
+        urllib.request.urlretrieve(DSPCBSD_PLUS_URL, zip_path)
+
+    md5 = file_md5(zip_path)
+    if md5 != DSPCBSD_PLUS_MD5:
+        raise ValueError(f"DsPCBSD+ checksum mismatch: expected {DSPCBSD_PLUS_MD5}, got {md5}")
+
+    print("DsPCBSD+ zip verified:", md5)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(cache_root)
+
+    yolo_root = find_dspcbsd_yolo_root(cache_root)
+    if yolo_root is None:
+        raise FileNotFoundError(f"Could not find Data_YOLO inside {cache_root}")
+    print("DsPCBSD+ YOLO root:", yolo_root)
+    return yolo_root
+
+
+def parse_dspcbsd_label_file(label_path: Path):
+    labels = []
+    skipped_boxes = Counter()
+    for line in label_path.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) != 5:
+            skipped_boxes["malformed"] += 1
+            continue
+
+        src_id = int(float(parts[0]))
+        if src_id < 0 or src_id >= len(DSPCBSD_YOLO_CODES):
+            skipped_boxes["unknown_id"] += 1
+            continue
+
+        src_code = DSPCBSD_YOLO_CODES[src_id]
+        target_class = DSPCBSD_TO_PROJECT_CLASS.get(src_code)
+        if target_class is None:
+            skipped_boxes[src_code] += 1
+            continue
+
+        x, y, w, h = map(float, parts[1:])
+        if w > 0 and h > 0:
+            labels.append((CLASS_TO_ID[target_class.lower()], x, y, w, h))
+        else:
+            skipped_boxes["invalid_box"] += 1
+    return labels, skipped_boxes
+
+
+def find_matching_image(image_dir: Path, stem: str):
+    for suffix in [".jpg", ".jpeg", ".png", ".bmp"]:
+        candidate = image_dir / f"{stem}{suffix}"
+        if candidate.exists():
+            return candidate
+    matches = list(image_dir.glob(f"{stem}.*"))
+    return matches[0] if matches else None
+
+
+def load_dspcbsd_plus_records(yolo_root: Path):
+    records_by_group = {}
+    skipped_boxes = Counter()
+    kept_boxes = Counter()
+    missing_images = 0
+
+    for source_split in ["train", "val"]:
+        label_dir = yolo_root / "labels" / source_split
+        image_dir = yolo_root / "images" / source_split
+        if not label_dir.exists():
+            continue
+
+        for label_path in sorted(label_dir.glob("*.txt")):
+            labels, skipped = parse_dspcbsd_label_file(label_path)
+            skipped_boxes.update(skipped)
+            if not labels:
+                continue
+
+            image_path = find_matching_image(image_dir, label_path.stem)
+            if image_path is None:
+                missing_images += 1
+                continue
+
+            for cls_id, *_ in labels:
+                kept_boxes[CLASSES[cls_id]] += 1
+
+            primary_class = CLASSES[labels[0][0]]
+            group = f"DsPCBSD_plus_{source_split}_{primary_class}"
+            records_by_group.setdefault(group, []).append((image_path, labels, group))
+
+    records = [record for group_records in records_by_group.values() for record in group_records]
+    if MAX_DSPCBSD_PLUS_IMAGES is not None and len(records) > MAX_DSPCBSD_PLUS_IMAGES:
+        rng = random.Random(SEED)
+        rng.shuffle(records)
+        records = records[:MAX_DSPCBSD_PLUS_IMAGES]
+        records_by_group = {}
+        for image_path, labels, group in records:
+            records_by_group.setdefault(group, []).append((image_path, labels, group))
+
+    print("DsPCBSD+ images with overlapping project classes:", sum(len(v) for v in records_by_group.values()))
+    print("DsPCBSD+ kept boxes by project class:", dict(kept_boxes))
+    print("DsPCBSD+ skipped non-project boxes:", dict(skipped_boxes))
+    if missing_images:
+        print("DsPCBSD+ labels missing matching images:", missing_images)
+
+    return records_by_group
 """
     ),
     code_cell(
@@ -176,6 +335,12 @@ for xml_path in sorted((DATASET_ROOT / "Annotations").rglob("*.xml")):
     image_path, labels, folder = parse_annotation(xml_path)
     if image_path.exists() and labels:
         records_by_folder.setdefault(folder, []).append((image_path, labels, folder))
+
+dspcbsd_yolo_root = prepare_dspcbsd_plus()
+if dspcbsd_yolo_root is not None:
+    dspcbsd_records_by_group = load_dspcbsd_plus_records(dspcbsd_yolo_root)
+    for group, records in dspcbsd_records_by_group.items():
+        records_by_folder.setdefault(group, []).extend(records)
 
 train_records = []
 val_records = []
@@ -609,7 +774,8 @@ else:
     code_cell(
         """
 traceability = pd.DataFrame([
-    ["Detect and localize six PCB defect classes", "YOLO dataset conversion, YOLOv8 training, prediction gallery"],
+    ["Detect and localize six PCB defect classes", "YOLO dataset conversion, DsPCBSD+ overlap merge, YOLOv8 training, prediction gallery"],
+    ["Improve dataset realism and size", "Adds DsPCBSD+ real PCB images from Figshare DOI 10.6084/m9.figshare.24970329.v1 for overlapping classes"],
     ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training"],
     ["Report precision, recall, mAP", "Validation and held-out test metrics saved to project_metrics_summary.csv"],
     ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency and target pass/fail"],

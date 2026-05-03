@@ -15,6 +15,7 @@ The proposal and survey describe an end-to-end PCB inspection system with these 
 Current implementation status:
 
 - `kaggle_kernel/project.ipynb` prepares the Kaggle PCB dataset from Pascal VOC XML into YOLO format.
+- It downloads and verifies DsPCBSD+ from Figshare DOI `10.6084/m9.figshare.24970329.v1`, then merges the overlapping real-image categories into the project taxonomy.
 - It creates stratified `train`, `val`, and `test` splits by defect folder.
 - It trains YOLOv8 on Kaggle GPU with small-defect-oriented augmentation.
 - It evaluates both validation and held-out test metrics.
@@ -25,8 +26,14 @@ Current implementation status:
 
 Remaining high-value milestones:
 
-- Run the Kaggle GPU notebook to completion and capture final metrics.
+- Run the DsPCBSD+-augmented Kaggle GPU notebook to completion and compare metrics against the previous baseline.
 - If time allows, enable `RUN_RTDETR_BENCHMARK=True` for the transformer comparison.
 - Rotate the Kaggle access token because it was visible during setup.
 - Build the TensorRT engine directly on Jetson Orin for the final deployment demo.
 - Add final report plots/tables from the generated CSV/JSON artifacts.
+
+Dataset-improvement note:
+
+- DsPCBSD+ has nine categories. The current notebook uses overlap mode to add `SH`, `SP`, `SC`, `OP`, and `MB` as `Short`, `Spur`, `Spurious_copper`, `Open_circuit`, and `Mouse_bite`.
+- DsPCBSD+ categories `HB`, `CS`, `CFO`, and `BMFO` are skipped for now because they are not one-to-one matches for the six classes listed in the proposal.
+- `Missing_hole` remains sourced from the original Kaggle PCB dataset.
