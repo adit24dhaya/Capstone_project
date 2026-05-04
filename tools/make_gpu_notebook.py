@@ -134,6 +134,9 @@ SUMMARY_CSV = WORK_DIR / "project_metrics_summary.csv"
 ROBUSTNESS_CSV = WORK_DIR / "robustness_metrics.csv"
 ARCHITECTURE_CSV = WORK_DIR / "architecture_comparison.csv"
 ROBUSTNESS_ROOT = CACHE_DIR / "robustness_eval"
+PER_CLASS_CSV = WORK_DIR / "per_class_metrics.csv"
+LATENCY_TABLE_CSV = WORK_DIR / "latency_comparison.csv"
+FINAL_SUMMARY_CSV = WORK_DIR / "final_results_summary.csv"
 
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
@@ -532,8 +535,37 @@ def metrics_to_dict(metrics, split_name):
     return row
 
 
+def per_class_metrics_to_rows(metrics, model_name, split_name):
+    rows = []
+    box = getattr(metrics, "box", None)
+    if box is None:
+        return rows
+    class_indices = list(getattr(box, "ap_class_index", []))
+    if not class_indices:
+        class_indices = list(range(len(CLASSES)))
+    for i, cls_id in enumerate(class_indices):
+        try:
+            p, r, ap50, ap = box.class_result(i)
+        except Exception:
+            continue
+        cls_id = int(cls_id)
+        cls_name = CLASSES[cls_id] if 0 <= cls_id < len(CLASSES) else str(cls_id)
+        rows.append({
+            "model": model_name,
+            "split": split_name,
+            "class_id": cls_id,
+            "class_name": cls_name,
+            "precision": float(p),
+            "recall": float(r),
+            "mAP50": float(ap50),
+            "mAP50_95": float(ap),
+        })
+    return rows
+
+
 summary_rows = []
 architecture_rows = []
+per_class_rows = []
 for split_name in ["val", "test"]:
     metrics = model.val(data=str(DATA_YAML), imgsz=IMG_SIZE, device=0, split=split_name)
     row = metrics_to_dict(metrics, split_name)
@@ -543,7 +575,9 @@ for split_name in ["val", "test"]:
         "family": "CNN / YOLO baseline",
         **row,
     })
+    per_class_rows.extend(per_class_metrics_to_rows(metrics, "YOLOv8n", split_name))
     print(split_name.upper(), row)
+
 
 summary_df = pd.DataFrame(summary_rows)
 summary_df.to_csv(SUMMARY_CSV, index=False)
@@ -554,6 +588,11 @@ architecture_df = pd.DataFrame(architecture_rows)
 architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
 display(architecture_df)
 print("Saved architecture comparison:", ARCHITECTURE_CSV)
+
+per_class_df = pd.DataFrame(per_class_rows)
+per_class_df.to_csv(PER_CLASS_CSV, index=False)
+display(per_class_df)
+print("Saved per-class metrics:", PER_CLASS_CSV)
 """
     ),
     code_cell(
@@ -609,6 +648,12 @@ def albumentations_bbox_params():
 
 
 def make_robustness_transforms():
+    # Albumentations 2.x uses std_range/mean_range, while 1.x uses var_limit.
+    try:
+        gaussian_noise = A.GaussNoise(std_range=(0.02, 0.08), mean_range=(0.0, 0.0), p=1.0)
+    except TypeError:
+        gaussian_noise = A.GaussNoise(var_limit=(5.0, 25.0), p=1.0)
+
     return {
         "clean_subset": A.Compose([], bbox_params=albumentations_bbox_params()),
         "brightness_contrast": A.Compose(
@@ -616,7 +661,7 @@ def make_robustness_transforms():
             bbox_params=albumentations_bbox_params(),
         ),
         "gaussian_noise": A.Compose(
-            [A.GaussNoise(p=1.0)],
+            [gaussian_noise],
             bbox_params=albumentations_bbox_params(),
         ),
         "motion_blur": A.Compose(
@@ -744,6 +789,11 @@ if RUN_RTDETR_BENCHMARK:
             "family": "Transformer-style detector",
             **metrics_to_dict(rtdetr_metrics, split_name),
         })
+        per_class_rows = per_class_metrics_to_rows(rtdetr_metrics, "RT-DETR-L", split_name)
+        if per_class_rows:
+            per_class_df = pd.read_csv(PER_CLASS_CSV) if PER_CLASS_CSV.exists() else pd.DataFrame()
+            per_class_df = pd.concat([per_class_df, pd.DataFrame(per_class_rows)], ignore_index=True)
+            per_class_df.to_csv(PER_CLASS_CSV, index=False)
         print("RT-DETR", split_name.upper(), rtdetr_rows[-1])
     architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
     architecture_df = pd.concat([architecture_df, pd.DataFrame(rtdetr_rows)], ignore_index=True)
@@ -917,6 +967,72 @@ if RUN_RTDETR_BENCHMARK:
 
 print("Latency summary:", latency_summary)
 (WORK_DIR / "latency_summary.json").write_text(json.dumps(latency_summary, indent=2))
+
+latency_rows = []
+for model_name, stats in latency_summary.items():
+    latency_rows.append({"model": model_name, **stats})
+latency_df = pd.DataFrame(latency_rows)
+latency_df.to_csv(LATENCY_TABLE_CSV, index=False)
+display(latency_df)
+print("Saved latency table:", LATENCY_TABLE_CSV)
+"""
+    ),
+    code_cell(
+        """
+def load_csv_or_empty(path: Path):
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+summary_df = load_csv_or_empty(SUMMARY_CSV)
+architecture_df = load_csv_or_empty(ARCHITECTURE_CSV)
+robustness_df = load_csv_or_empty(ROBUSTNESS_CSV)
+per_class_df = load_csv_or_empty(PER_CLASS_CSV)
+latency_df = load_csv_or_empty(LATENCY_TABLE_CSV)
+
+print("YOLOv8n val/test metrics")
+display(summary_df)
+print("Architecture comparison (YOLOv8n vs RT-DETR-L)")
+display(architecture_df)
+print("Robustness metrics")
+display(robustness_df)
+print("Per-class metrics")
+display(per_class_df)
+print("Latency comparison")
+display(latency_df)
+
+final_summary_rows = []
+if not architecture_df.empty:
+    top_arch = architecture_df.sort_values("mAP50_95", ascending=False).iloc[0]
+    final_summary_rows.append({
+        "summary_item": "Best architecture row by mAP50-95",
+        "model": top_arch.get("model", ""),
+        "split": top_arch.get("split", ""),
+        "mAP50": top_arch.get("mAP50", np.nan),
+        "mAP50_95": top_arch.get("mAP50_95", np.nan),
+    })
+if not robustness_df.empty:
+    weakest = robustness_df.sort_values("mAP50_95", ascending=True).iloc[0]
+    final_summary_rows.append({
+        "summary_item": "Weakest robustness condition",
+        "model": "YOLOv8n",
+        "split": weakest.get("condition", ""),
+        "mAP50": weakest.get("mAP50", np.nan),
+        "mAP50_95": weakest.get("mAP50_95", np.nan),
+    })
+if not latency_df.empty:
+    fastest = latency_df.sort_values("mean_ms", ascending=True).iloc[0]
+    final_summary_rows.append({
+        "summary_item": "Fastest model by mean latency",
+        "model": fastest.get("model", ""),
+        "split": "test",
+        "mAP50": np.nan,
+        "mAP50_95": np.nan,
+    })
+
+final_summary_df = pd.DataFrame(final_summary_rows)
+final_summary_df.to_csv(FINAL_SUMMARY_CSV, index=False)
+print("Saved final summary:", FINAL_SUMMARY_CSV)
+display(final_summary_df)
 """
     ),
     code_cell(
@@ -991,8 +1107,8 @@ else:
 traceability = pd.DataFrame([
     ["Detect and localize six PCB defect classes", "YOLO dataset conversion, DsPCBSD+ overlap merge, YOLOv8 training, prediction gallery"],
     ["Improve dataset realism and size", "Adds DsPCBSD+ real PCB images from Figshare DOI 10.6084/m9.figshare.24970329.v1 for overlapping classes"],
-    ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training, plus Albumentations robustness tests"],
-    ["Report precision, recall, mAP", "Validation and held-out test metrics saved to project_metrics_summary.csv"],
+    ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training, plus Albumentations robustness tests; mild synthetic Gaussian noise in robustness evaluation and documented training-noise limitation"],
+    ["Report precision, recall, mAP", "Validation and held-out test metrics saved to project_metrics_summary.csv with per-class metrics in per_class_metrics.csv"],
     ["Evaluate robustness under imaging variation", "robustness_metrics.csv records clean, brightness/contrast, noise, blur, and rotation stress tests"],
     ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency per model (YOLOv8n; RT-DETR-L when benchmark runs) and 100 ms pass/fail"],
     ["Provide deployment artifact", "ONNX export plus optional TensorRT export path"],
