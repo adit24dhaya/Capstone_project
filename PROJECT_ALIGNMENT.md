@@ -20,7 +20,7 @@ Current implementation status:
 - It trains YOLOv8 on Kaggle GPU with small-defect-oriented augmentation.
 - It evaluates both validation and held-out test metrics.
 - It runs Albumentations-based robustness tests for brightness/contrast, Gaussian noise, motion blur, and rotation.
-- It writes `project_metrics_summary.csv`, `architecture_comparison.csv`, `robustness_metrics.csv`, `latency_summary.json`, `deployment_exports.json`, and `requirements_traceability.csv`.
+- It writes `project_metrics_summary.csv`, `architecture_comparison.csv` (YOLOv8n and RT-DETR-L rows for **val** and **test**), `robustness_metrics.csv`, `latency_summary.json`, `deployment_exports.json`, and `requirements_traceability.csv`.
 - It exports the trained model to ONNX.
 - It enables a `RUN_RTDETR_BENCHMARK` switch for a transformer-style RT-DETR comparison phase, addressing the CNN-vs-Transformer requirement from the survey.
 - It includes an optional `RUN_TENSORRT_EXPORT` switch, with final Jetson TensorRT export expected to be rebuilt on the Jetson target.

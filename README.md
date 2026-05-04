@@ -53,9 +53,9 @@ Local dataset downloads are intentionally ignored by git because they are large.
 After a successful Kaggle run, the important generated files are expected in `/kaggle/working`:
 
 - `project_metrics_summary.csv`
-- `architecture_comparison.csv`
+- `architecture_comparison.csv` (YOLOv8n and RT-DETR-L, val and test rows when RT-DETR benchmark runs)
 - `robustness_metrics.csv`
-- `latency_summary.json`
+- `latency_summary.json` (keys `yolov8n`, and `rtdetr_l` when the RT-DETR benchmark cell ran in the same session)
 - `deployment_exports.json`
 - `requirements_traceability.csv`
 - prediction visualization folders

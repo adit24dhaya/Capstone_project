@@ -54,6 +54,7 @@ from pathlib import Path
 from collections import Counter
 import hashlib
 import json
+import os
 import random
 import shutil
 import time
@@ -69,6 +70,8 @@ import pandas as pd
 import torch
 from IPython.display import HTML, display
 from ultralytics import YOLO
+
+os.environ.setdefault("WANDB_MODE", "disabled")
 
 SEED = 42
 VAL_RATIO = 0.15
@@ -92,6 +95,9 @@ DSPCBSD_PLUS_DOI = "10.6084/m9.figshare.24970329.v1"
 
 random.seed(SEED)
 np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
 
 CLASSES = [
     "Mouse_bite",
@@ -532,12 +538,11 @@ for split_name in ["val", "test"]:
     metrics = model.val(data=str(DATA_YAML), imgsz=IMG_SIZE, device=0, split=split_name)
     row = metrics_to_dict(metrics, split_name)
     summary_rows.append(row)
-    if split_name == "test":
-        architecture_rows.append({
-            "model": "YOLOv8n",
-            "family": "CNN / YOLO baseline",
-            **row,
-        })
+    architecture_rows.append({
+        "model": "YOLOv8n",
+        "family": "CNN / YOLO baseline",
+        **row,
+    })
     print(split_name.upper(), row)
 
 summary_df = pd.DataFrame(summary_rows)
@@ -569,6 +574,21 @@ def read_yolo_file(label_path: Path):
             boxes.append([x, y, w, h])
             class_labels.append(cls_id)
     return boxes, class_labels
+
+
+def sanitize_yolo_boxes_for_albumentations(boxes, class_labels, eps=1e-3):
+    # Clamp YOLO xywh so corners stay strictly inside [0, 1] (strict Albumentations bbox checks).
+    out_boxes = []
+    out_labels = []
+    for box, cls_id in zip(boxes, class_labels):
+        x, y, w, h = (float(v) for v in box)
+        w = max(eps, min(w, 1.0 - 2 * eps))
+        h = max(eps, min(h, 1.0 - 2 * eps))
+        x = min(max(x, w / 2 + eps), 1.0 - w / 2 - eps)
+        y = min(max(y, h / 2 + eps), 1.0 - h / 2 - eps)
+        out_boxes.append([x, y, w, h])
+        out_labels.append(cls_id)
+    return out_boxes, out_labels
 
 
 def write_yolo_file(label_path: Path, boxes, class_labels):
@@ -635,6 +655,7 @@ def build_robustness_dataset(condition_name, transform, image_paths):
     for image_path in image_paths:
         label_path = TEST_LBL_DIR / f"{image_path.stem}.txt"
         boxes, class_labels = read_yolo_file(label_path)
+        boxes, class_labels = sanitize_yolo_boxes_for_albumentations(boxes, class_labels)
         if not boxes:
             continue
 
@@ -643,8 +664,9 @@ def build_robustness_dataset(condition_name, transform, image_paths):
             continue
 
         augmented = transform(image=image, bboxes=boxes, class_labels=class_labels)
-        aug_boxes = augmented["bboxes"]
-        aug_labels = augmented["class_labels"]
+        aug_boxes = [list(map(float, b)) for b in augmented["bboxes"]]
+        aug_labels = list(augmented["class_labels"])
+        aug_boxes, aug_labels = sanitize_yolo_boxes_for_albumentations(aug_boxes, aug_labels)
         if not aug_boxes:
             continue
 
@@ -714,17 +736,19 @@ if RUN_RTDETR_BENCHMARK:
     )
     rtdetr_best = WORK_DIR / "runs/rtdetr/train/weights/best.pt"
     rtdetr_model = RTDETR(str(rtdetr_best))
-    rtdetr_metrics = rtdetr_model.val(data=str(DATA_YAML), imgsz=RTDETR_IMG_SIZE, device=0, split="test")
-    rtdetr_row = {
-        "model": "RT-DETR-L",
-        "family": "Transformer-style detector",
-        **metrics_to_dict(rtdetr_metrics, "test"),
-    }
+    rtdetr_rows = []
+    for split_name in ["val", "test"]:
+        rtdetr_metrics = rtdetr_model.val(data=str(DATA_YAML), imgsz=RTDETR_IMG_SIZE, device=0, split=split_name)
+        rtdetr_rows.append({
+            "model": "RT-DETR-L",
+            "family": "Transformer-style detector",
+            **metrics_to_dict(rtdetr_metrics, split_name),
+        })
+        print("RT-DETR", split_name.upper(), rtdetr_rows[-1])
     architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
-    architecture_df = pd.concat([architecture_df, pd.DataFrame([rtdetr_row])], ignore_index=True)
+    architecture_df = pd.concat([architecture_df, pd.DataFrame(rtdetr_rows)], ignore_index=True)
     architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
     display(architecture_df)
-    print("RT-DETR transformer benchmark:", rtdetr_row)
     print("Saved architecture comparison:", ARCHITECTURE_CSV)
 else:
     print("RT-DETR transformer benchmark is disabled. Set RUN_RTDETR_BENCHMARK=True for the architecture comparison phase.")
@@ -850,7 +874,7 @@ if val_imgs:
     ),
     code_cell(
         """
-def measure_latency(image_paths, n=80, warmup=10, conf=0.25):
+def measure_latency(predict_model, image_paths, imgsz, n=80, warmup=10, conf=0.25):
     sample = image_paths[:]
     random.shuffle(sample)
     sample = sample[: min(n, len(sample))]
@@ -858,14 +882,14 @@ def measure_latency(image_paths, n=80, warmup=10, conf=0.25):
         return {}
 
     for p in sample[: min(warmup, len(sample))]:
-        _ = model.predict(source=str(p), imgsz=IMG_SIZE, conf=conf, device=0, verbose=False)
+        _ = predict_model.predict(source=str(p), imgsz=imgsz, conf=conf, device=0, verbose=False)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
     timings = []
     for p in sample:
         start = time.perf_counter()
-        _ = model.predict(source=str(p), imgsz=IMG_SIZE, conf=conf, device=0, verbose=False)
+        _ = predict_model.predict(source=str(p), imgsz=imgsz, conf=conf, device=0, verbose=False)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         timings.append((time.perf_counter() - start) * 1000)
@@ -880,9 +904,19 @@ def measure_latency(image_paths, n=80, warmup=10, conf=0.25):
     }
 
 
-latency = measure_latency(sorted(TEST_IMG_DIR.glob("*.*")), n=80, warmup=10, conf=0.25)
-print("Latency summary:", latency)
-(WORK_DIR / "latency_summary.json").write_text(json.dumps(latency, indent=2))
+test_paths = sorted(TEST_IMG_DIR.glob("*.*"))
+latency_summary = {
+    "yolov8n": measure_latency(model, test_paths, IMG_SIZE, n=80, warmup=10, conf=0.25),
+}
+if RUN_RTDETR_BENCHMARK:
+    rtdetr_m = globals().get("rtdetr_model")
+    if rtdetr_m is not None:
+        latency_summary["rtdetr_l"] = measure_latency(
+            rtdetr_m, test_paths, RTDETR_IMG_SIZE, n=80, warmup=10, conf=0.25
+        )
+
+print("Latency summary:", latency_summary)
+(WORK_DIR / "latency_summary.json").write_text(json.dumps(latency_summary, indent=2))
 """
     ),
     code_cell(
@@ -960,9 +994,9 @@ traceability = pd.DataFrame([
     ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training, plus Albumentations robustness tests"],
     ["Report precision, recall, mAP", "Validation and held-out test metrics saved to project_metrics_summary.csv"],
     ["Evaluate robustness under imaging variation", "robustness_metrics.csv records clean, brightness/contrast, noise, blur, and rotation stress tests"],
-    ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency and target pass/fail"],
+    ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency per model (YOLOv8n; RT-DETR-L when benchmark runs) and 100 ms pass/fail"],
     ["Provide deployment artifact", "ONNX export plus optional TensorRT export path"],
-    ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8 CNN baseline and RT-DETR transformer-style benchmark"],
+    ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8n and RT-DETR-L on val and test splits"],
     ["Provide interpretable visual output", "Ground-truth vs prediction plots and saved prediction gallery"],
 ])
 traceability.columns = ["Proposal requirement", "Notebook implementation"]
@@ -1010,7 +1044,10 @@ notebook = {
     "nbformat_minor": 5,
 }
 
-out = Path("kaggle_kernel/project.ipynb")
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps(notebook, indent=1))
-print(f"Wrote {out}")
+repo_root = Path(__file__).resolve().parent.parent
+text = json.dumps(notebook, indent=1)
+for rel in ("kaggle_kernel/project.ipynb", "project.ipynb"):
+    out = repo_root / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    print(f"Wrote {out}")
