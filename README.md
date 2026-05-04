@@ -7,6 +7,8 @@ This project implements an end-to-end PCB defect detection workflow aligned with
 - Detect six PCB defect classes: mouse bite, spur, open circuit, short, missing hole, and spurious copper.
 - Train a deep learning detector using GPU acceleration.
 - Evaluate precision, recall, mAP50, mAP50-95, and inference latency.
+- Benchmark a transformer-style RT-DETR detector against the YOLOv8 CNN baseline.
+- Test robustness with Albumentations image transformations.
 - Target real-time inference below 100 ms per image.
 - Export ONNX artifacts, with an optional TensorRT path for Jetson Orin deployment.
 - Provide visual prediction outputs for inspection and reporting.
@@ -51,6 +53,8 @@ Local dataset downloads are intentionally ignored by git because they are large.
 After a successful Kaggle run, the important generated files are expected in `/kaggle/working`:
 
 - `project_metrics_summary.csv`
+- `architecture_comparison.csv`
+- `robustness_metrics.csv`
 - `latency_summary.json`
 - `deployment_exports.json`
 - `requirements_traceability.csv`

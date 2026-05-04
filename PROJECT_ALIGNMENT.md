@@ -19,15 +19,15 @@ Current implementation status:
 - It creates stratified `train`, `val`, and `test` splits by defect folder.
 - It trains YOLOv8 on Kaggle GPU with small-defect-oriented augmentation.
 - It evaluates both validation and held-out test metrics.
-- It writes `project_metrics_summary.csv`, `latency_summary.json`, `deployment_exports.json`, and `requirements_traceability.csv`.
+- It runs Albumentations-based robustness tests for brightness/contrast, Gaussian noise, motion blur, and rotation.
+- It writes `project_metrics_summary.csv`, `architecture_comparison.csv`, `robustness_metrics.csv`, `latency_summary.json`, `deployment_exports.json`, and `requirements_traceability.csv`.
 - It exports the trained model to ONNX.
-- It includes an optional `RUN_RTDETR_BENCHMARK` switch for a transformer-style RT-DETR comparison phase.
+- It enables a `RUN_RTDETR_BENCHMARK` switch for a transformer-style RT-DETR comparison phase, addressing the CNN-vs-Transformer requirement from the survey.
 - It includes an optional `RUN_TENSORRT_EXPORT` switch, with final Jetson TensorRT export expected to be rebuilt on the Jetson target.
 
 Remaining high-value milestones:
 
-- Run the DsPCBSD+-augmented Kaggle GPU notebook to completion and compare metrics against the previous baseline.
-- If time allows, enable `RUN_RTDETR_BENCHMARK=True` for the transformer comparison.
+- Run the RT-DETR/robustness version to completion and compare its `architecture_comparison.csv` and `robustness_metrics.csv` results against YOLOv8.
 - Rotate the Kaggle access token because it was visible during setup.
 - Build the TensorRT engine directly on Jetson Orin for the final deployment demo.
 - Add final report plots/tables from the generated CSV/JSON artifacts.

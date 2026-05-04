@@ -25,7 +25,7 @@ cells = [
         """
 # Automated PCB Defect Detection with Deep Learning
 
-This notebook is configured for Kaggle GPU. It prepares the PCB dataset, converts Pascal VOC XML annotations to YOLO labels, trains a YOLOv8 detector, evaluates validation/test performance, measures inference latency, and exports deployment artifacts.
+This notebook is configured for Kaggle GPU. It prepares the PCB dataset, converts annotations to YOLO labels, trains a YOLOv8 detector, runs Albumentations-based robustness tests, benchmarks a transformer-style RT-DETR detector, measures inference latency, and exports deployment artifacts.
 """
     ),
     code_cell(
@@ -34,10 +34,18 @@ import importlib.util
 import subprocess
 import sys
 
-if importlib.util.find_spec("ultralytics") is None:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "ultralytics", "onnx", "onnxruntime"])
+required_packages = {
+    "ultralytics": "ultralytics",
+    "albumentations": "albumentations",
+    "onnx": "onnx",
+    "onnxruntime": "onnxruntime",
+}
+missing = [pip_name for module_name, pip_name in required_packages.items() if importlib.util.find_spec(module_name) is None]
+
+if missing:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *missing])
 else:
-    print("ultralytics is already installed")
+    print("ultralytics, albumentations, onnx, and onnxruntime are already installed")
 """
     ),
     code_cell(
@@ -53,6 +61,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 
+import albumentations as A
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -67,7 +76,12 @@ TEST_RATIO = 0.15
 EPOCHS = 50
 IMG_SIZE = 640
 BATCH = 16
-RUN_RTDETR_BENCHMARK = False
+RUN_RTDETR_BENCHMARK = True
+RTDETR_EPOCHS = 10
+RTDETR_BATCH = 4
+RTDETR_IMG_SIZE = 640
+RUN_ROBUSTNESS_TESTS = True
+ROBUSTNESS_SAMPLE_SIZE = 250
 RUN_TENSORRT_EXPORT = False
 USE_DSPCBSD_PLUS = True
 MAX_DSPCBSD_PLUS_IMAGES = None
@@ -111,6 +125,9 @@ TEST_IMG_DIR = YOLO_ROOT / "test/images"
 TEST_LBL_DIR = YOLO_ROOT / "test/labels"
 PRED_SAVE_DIR = WORK_DIR / "vis_predictions/val_preds"
 SUMMARY_CSV = WORK_DIR / "project_metrics_summary.csv"
+ROBUSTNESS_CSV = WORK_DIR / "robustness_metrics.csv"
+ARCHITECTURE_CSV = WORK_DIR / "architecture_comparison.csv"
+ROBUSTNESS_ROOT = CACHE_DIR / "robustness_eval"
 
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
@@ -510,16 +527,170 @@ def metrics_to_dict(metrics, split_name):
 
 
 summary_rows = []
+architecture_rows = []
 for split_name in ["val", "test"]:
     metrics = model.val(data=str(DATA_YAML), imgsz=IMG_SIZE, device=0, split=split_name)
     row = metrics_to_dict(metrics, split_name)
     summary_rows.append(row)
+    if split_name == "test":
+        architecture_rows.append({
+            "model": "YOLOv8n",
+            "family": "CNN / YOLO baseline",
+            **row,
+        })
     print(split_name.upper(), row)
 
 summary_df = pd.DataFrame(summary_rows)
 summary_df.to_csv(SUMMARY_CSV, index=False)
 display(summary_df)
 print("Saved metric summary:", SUMMARY_CSV)
+
+architecture_df = pd.DataFrame(architecture_rows)
+architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
+display(architecture_df)
+print("Saved architecture comparison:", ARCHITECTURE_CSV)
+"""
+    ),
+    code_cell(
+        """
+def read_yolo_file(label_path: Path):
+    boxes = []
+    class_labels = []
+    if not label_path.exists():
+        return boxes, class_labels
+
+    for line in label_path.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) != 5:
+            continue
+        cls_id = int(float(parts[0]))
+        x, y, w, h = map(float, parts[1:])
+        if w > 0 and h > 0:
+            boxes.append([x, y, w, h])
+            class_labels.append(cls_id)
+    return boxes, class_labels
+
+
+def write_yolo_file(label_path: Path, boxes, class_labels):
+    lines = []
+    for cls_id, box in zip(class_labels, boxes):
+        x, y, w, h = [max(0.0, min(1.0, float(v))) for v in box]
+        if w > 0 and h > 0:
+            lines.append(f"{int(cls_id)} {x:.6f} {y:.6f} {w:.6f} {h:.6f}")
+    label_path.write_text("\\n".join(lines) + ("\\n" if lines else ""))
+
+
+def albumentations_bbox_params():
+    return A.BboxParams(
+        format="yolo",
+        label_fields=["class_labels"],
+        min_visibility=0.25,
+    )
+
+
+def make_robustness_transforms():
+    return {
+        "clean_subset": A.Compose([], bbox_params=albumentations_bbox_params()),
+        "brightness_contrast": A.Compose(
+            [A.RandomBrightnessContrast(brightness_limit=0.30, contrast_limit=0.25, p=1.0)],
+            bbox_params=albumentations_bbox_params(),
+        ),
+        "gaussian_noise": A.Compose(
+            [A.GaussNoise(p=1.0)],
+            bbox_params=albumentations_bbox_params(),
+        ),
+        "motion_blur": A.Compose(
+            [A.MotionBlur(blur_limit=5, p=1.0)],
+            bbox_params=albumentations_bbox_params(),
+        ),
+        "rotate_10deg": A.Compose(
+            [A.Rotate(limit=(10, 10), border_mode=cv2.BORDER_CONSTANT, p=1.0)],
+            bbox_params=albumentations_bbox_params(),
+        ),
+    }
+
+
+def write_data_yaml(root: Path, yaml_path: Path):
+    names_block = "\\n".join(f"  {i}: {name}" for i, name in enumerate(CLASSES))
+    yaml_path.write_text(
+        f"path: {root}\\n"
+        "train: test/images\\n"
+        "val: test/images\\n"
+        "test: test/images\\n"
+        f"names:\\n{names_block}\\n"
+    )
+
+
+def build_robustness_dataset(condition_name, transform, image_paths):
+    condition_root = ROBUSTNESS_ROOT / condition_name
+    image_out = condition_root / "test/images"
+    label_out = condition_root / "test/labels"
+    if condition_root.exists():
+        shutil.rmtree(condition_root)
+    image_out.mkdir(parents=True, exist_ok=True)
+    label_out.mkdir(parents=True, exist_ok=True)
+
+    kept_images = 0
+    kept_boxes = 0
+    for image_path in image_paths:
+        label_path = TEST_LBL_DIR / f"{image_path.stem}.txt"
+        boxes, class_labels = read_yolo_file(label_path)
+        if not boxes:
+            continue
+
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+
+        augmented = transform(image=image, bboxes=boxes, class_labels=class_labels)
+        aug_boxes = augmented["bboxes"]
+        aug_labels = augmented["class_labels"]
+        if not aug_boxes:
+            continue
+
+        out_image_path = image_out / image_path.name
+        out_label_path = label_out / f"{image_path.stem}.txt"
+        cv2.imwrite(str(out_image_path), augmented["image"])
+        write_yolo_file(out_label_path, aug_boxes, aug_labels)
+        kept_images += 1
+        kept_boxes += len(aug_boxes)
+
+    yaml_path = condition_root / "data.yaml"
+    write_data_yaml(condition_root, yaml_path)
+    return yaml_path, kept_images, kept_boxes
+
+
+def run_robustness_tests():
+    if not RUN_ROBUSTNESS_TESTS:
+        print("Robustness tests disabled. Set RUN_ROBUSTNESS_TESTS=True to enable them.")
+        return pd.DataFrame()
+
+    rng = random.Random(SEED)
+    image_paths = sorted(TEST_IMG_DIR.glob("*.*"))
+    rng.shuffle(image_paths)
+    image_paths = image_paths[: min(ROBUSTNESS_SAMPLE_SIZE, len(image_paths))]
+    print("Robustness sample images:", len(image_paths))
+
+    rows = []
+    for condition_name, transform in make_robustness_transforms().items():
+        yaml_path, kept_images, kept_boxes = build_robustness_dataset(condition_name, transform, image_paths)
+        if kept_images == 0:
+            print(f"Skipping {condition_name}: no transformed images with visible boxes.")
+            continue
+        metrics = model.val(data=str(yaml_path), imgsz=IMG_SIZE, device=0, split="test")
+        row = metrics_to_dict(metrics, condition_name)
+        row.update({"condition": condition_name, "images": kept_images, "boxes": kept_boxes})
+        rows.append(row)
+        print("ROBUSTNESS", row)
+
+    robustness_df = pd.DataFrame(rows)
+    robustness_df.to_csv(ROBUSTNESS_CSV, index=False)
+    display(robustness_df)
+    print("Saved robustness metrics:", ROBUSTNESS_CSV)
+    return robustness_df
+
+
+robustness_df = run_robustness_tests()
 """
     ),
     code_cell(
@@ -530,9 +701,9 @@ if RUN_RTDETR_BENCHMARK:
     rtdetr_model = RTDETR("rtdetr-l.pt")
     rtdetr_results = rtdetr_model.train(
         data=str(DATA_YAML),
-        epochs=max(10, EPOCHS // 2),
-        imgsz=IMG_SIZE,
-        batch=max(2, BATCH // 2),
+        epochs=RTDETR_EPOCHS,
+        imgsz=RTDETR_IMG_SIZE,
+        batch=RTDETR_BATCH,
         device=0,
         workers=2,
         project=str(WORK_DIR / "runs/rtdetr"),
@@ -543,8 +714,18 @@ if RUN_RTDETR_BENCHMARK:
     )
     rtdetr_best = WORK_DIR / "runs/rtdetr/train/weights/best.pt"
     rtdetr_model = RTDETR(str(rtdetr_best))
-    rtdetr_metrics = rtdetr_model.val(data=str(DATA_YAML), imgsz=IMG_SIZE, device=0, split="test")
-    print("RT-DETR transformer benchmark:", metrics_to_dict(rtdetr_metrics, "test_rtdetr"))
+    rtdetr_metrics = rtdetr_model.val(data=str(DATA_YAML), imgsz=RTDETR_IMG_SIZE, device=0, split="test")
+    rtdetr_row = {
+        "model": "RT-DETR-L",
+        "family": "Transformer-style detector",
+        **metrics_to_dict(rtdetr_metrics, "test"),
+    }
+    architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
+    architecture_df = pd.concat([architecture_df, pd.DataFrame([rtdetr_row])], ignore_index=True)
+    architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
+    display(architecture_df)
+    print("RT-DETR transformer benchmark:", rtdetr_row)
+    print("Saved architecture comparison:", ARCHITECTURE_CSV)
 else:
     print("RT-DETR transformer benchmark is disabled. Set RUN_RTDETR_BENCHMARK=True for the architecture comparison phase.")
 """
@@ -776,11 +957,12 @@ else:
 traceability = pd.DataFrame([
     ["Detect and localize six PCB defect classes", "YOLO dataset conversion, DsPCBSD+ overlap merge, YOLOv8 training, prediction gallery"],
     ["Improve dataset realism and size", "Adds DsPCBSD+ real PCB images from Figshare DOI 10.6084/m9.figshare.24970329.v1 for overlapping classes"],
-    ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training"],
+    ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training, plus Albumentations robustness tests"],
     ["Report precision, recall, mAP", "Validation and held-out test metrics saved to project_metrics_summary.csv"],
+    ["Evaluate robustness under imaging variation", "robustness_metrics.csv records clean, brightness/contrast, noise, blur, and rotation stress tests"],
     ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency and target pass/fail"],
     ["Provide deployment artifact", "ONNX export plus optional TensorRT export path"],
-    ["Compare CNN and Transformer-style detectors", "Optional RT-DETR benchmark switch for transformer comparison"],
+    ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8 CNN baseline and RT-DETR transformer-style benchmark"],
     ["Provide interpretable visual output", "Ground-truth vs prediction plots and saved prediction gallery"],
 ])
 traceability.columns = ["Proposal requirement", "Notebook implementation"]
