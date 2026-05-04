@@ -20,7 +20,7 @@ Current implementation status:
 - It trains YOLOv8 on Kaggle GPU with small-defect-oriented augmentation.
 - It evaluates both validation and held-out test metrics.
 - It runs Albumentations-based robustness tests for brightness/contrast, Gaussian noise, motion blur, and rotation.
-- It writes `project_metrics_summary.csv`, `architecture_comparison.csv` (YOLOv8n and RT-DETR-L rows for **val** and **test**), `robustness_metrics.csv`, `latency_summary.json`, `deployment_exports.json`, and `requirements_traceability.csv`.
+- It writes `project_metrics_summary.csv`, `architecture_comparison.csv` (YOLOv8n and RT-DETR-L rows for **val** and **test**), `robustness_metrics.csv`, `per_class_metrics.csv`, `latency_summary.json`, `latency_comparison.csv`, `final_results_summary.csv`, `deployment_exports.json`, and `requirements_traceability.csv`.
 - It exports the trained model to ONNX.
 - It enables a `RUN_RTDETR_BENCHMARK` switch for a transformer-style RT-DETR comparison phase, addressing the CNN-vs-Transformer requirement from the survey.
 - It includes an optional `RUN_TENSORRT_EXPORT` switch, with final Jetson TensorRT export expected to be rebuilt on the Jetson target.
@@ -37,3 +37,9 @@ Dataset-improvement note:
 - DsPCBSD+ has nine categories. The current notebook uses overlap mode to add `SH`, `SP`, `SC`, `OP`, and `MB` as `Short`, `Spur`, `Spurious_copper`, `Open_circuit`, and `Mouse_bite`.
 - DsPCBSD+ categories `HB`, `CS`, `CFO`, and `BMFO` are skipped for now because they are not one-to-one matches for the six classes listed in the proposal.
 - `Missing_hole` remains sourced from the original Kaggle PCB dataset.
+
+Architecture wording note:
+
+- To avoid over-claiming, the implementation is described as: *YOLOv8n CNN baseline + RT-DETR-L transformer-style benchmark*, not a custom fused YOLO-Transformer backbone.
+- In the latest benchmark run, RT-DETR-L improved test mAP50 (0.853 -> 0.878) and mAP50-95 (0.442 -> 0.479), while remaining slower than YOLOv8n.
+- Gaussian noise remains the weakest robustness condition and is tracked as a current limitation.
