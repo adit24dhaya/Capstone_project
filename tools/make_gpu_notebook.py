@@ -88,6 +88,10 @@ ROBUSTNESS_SAMPLE_SIZE = 250
 RUN_TENSORRT_EXPORT = False
 USE_DSPCBSD_PLUS = True
 MAX_DSPCBSD_PLUS_IMAGES = None
+RUN_HYBRID_FUSION = True
+HYBRID_CONF = 0.01
+HYBRID_FUSION_IOU = 0.55
+HYBRID_EVAL_SAMPLE_SIZE = None
 
 DSPCBSD_PLUS_URL = "https://ndownloader.figshare.com/files/44069552"
 DSPCBSD_PLUS_MD5 = "508334b65bdaea7336f4c1b5d5a80a81"
@@ -137,6 +141,8 @@ ROBUSTNESS_ROOT = CACHE_DIR / "robustness_eval"
 PER_CLASS_CSV = WORK_DIR / "per_class_metrics.csv"
 LATENCY_TABLE_CSV = WORK_DIR / "latency_comparison.csv"
 FINAL_SUMMARY_CSV = WORK_DIR / "final_results_summary.csv"
+HYBRID_FUSION_CSV = WORK_DIR / "hybrid_fusion_metrics.csv"
+HYBRID_PER_CLASS_CSV = WORK_DIR / "hybrid_per_class_metrics.csv"
 
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
@@ -806,6 +812,305 @@ else:
     ),
     code_cell(
         """
+def iou_xyxy(a, b):
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter_w = max(0.0, x2 - x1)
+    inter_h = max(0.0, y2 - y1)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0
+
+
+def nms_class_aware(boxes, iou_thr=0.6):
+    kept = []
+    by_class = {}
+    for b in boxes:
+        by_class.setdefault(int(b["cls"]), []).append(b)
+    for cls_id, cls_boxes in by_class.items():
+        cls_boxes = sorted(cls_boxes, key=lambda x: x["conf"], reverse=True)
+        while cls_boxes:
+            top = cls_boxes.pop(0)
+            kept.append(top)
+            cls_boxes = [b for b in cls_boxes if iou_xyxy(top["xyxy"], b["xyxy"]) < iou_thr]
+    return kept
+
+
+def predict_xyxy(det_model, image_path: Path, imgsz, conf_thr):
+    result = det_model.predict(source=str(image_path), conf=conf_thr, iou=0.7, imgsz=imgsz, device=0, verbose=False)[0]
+    out = []
+    if result.boxes is None or len(result.boxes) == 0:
+        return out
+    xyxy = result.boxes.xyxy.detach().cpu().numpy()
+    cls = result.boxes.cls.detach().cpu().numpy().astype(int)
+    conf = result.boxes.conf.detach().cpu().numpy()
+    for bb, c, p in zip(xyxy, cls, conf):
+        out.append({"cls": int(c), "conf": float(p), "xyxy": [float(v) for v in bb]})
+    return out
+
+
+def fuse_class_boxes(yolo_boxes, rtdetr_boxes, iou_thr):
+    fused = []
+    used_r = set()
+    for y in sorted(yolo_boxes, key=lambda x: x["conf"], reverse=True):
+        best_idx = -1
+        best_iou = 0.0
+        for idx, r in enumerate(rtdetr_boxes):
+            if idx in used_r:
+                continue
+            ov = iou_xyxy(y["xyxy"], r["xyxy"])
+            if ov > best_iou:
+                best_iou = ov
+                best_idx = idx
+        if best_idx >= 0 and best_iou >= iou_thr:
+            r = rtdetr_boxes[best_idx]
+            used_r.add(best_idx)
+            wy = max(y["conf"], 1e-6)
+            wr = max(r["conf"], 1e-6)
+            denom = wy + wr
+            fused_xyxy = [
+                (wy * y["xyxy"][0] + wr * r["xyxy"][0]) / denom,
+                (wy * y["xyxy"][1] + wr * r["xyxy"][1]) / denom,
+                (wy * y["xyxy"][2] + wr * r["xyxy"][2]) / denom,
+                (wy * y["xyxy"][3] + wr * r["xyxy"][3]) / denom,
+            ]
+            fused_conf = min(1.0, max(y["conf"], r["conf"]) + 0.05)
+            fused.append({"cls": y["cls"], "conf": float(fused_conf), "xyxy": fused_xyxy})
+        elif y["conf"] >= HYBRID_CONF:
+            fused.append(y)
+
+    for idx, r in enumerate(rtdetr_boxes):
+        if idx not in used_r and r["conf"] >= HYBRID_CONF:
+            fused.append(r)
+    return fused
+
+
+def hybrid_fuse_predictions(yolo_preds, rtdetr_preds, iou_thr=0.55):
+    out = []
+    classes = sorted(set([b["cls"] for b in yolo_preds] + [b["cls"] for b in rtdetr_preds]))
+    for cls_id in classes:
+        y_cls = [b for b in yolo_preds if b["cls"] == cls_id]
+        r_cls = [b for b in rtdetr_preds if b["cls"] == cls_id]
+        out.extend(fuse_class_boxes(y_cls, r_cls, iou_thr=iou_thr))
+    return nms_class_aware(out, iou_thr=0.6)
+
+
+def ap_from_pr(recalls, precisions):
+    mrec = np.concatenate(([0.0], recalls, [1.0]))
+    mpre = np.concatenate(([0.0], precisions, [0.0]))
+    for i in range(len(mpre) - 1, 0, -1):
+        mpre[i - 1] = max(mpre[i - 1], mpre[i])
+    idx = np.where(mrec[1:] != mrec[:-1])[0]
+    return float(np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]))
+
+
+def evaluate_predictions(gt_by_class, pred_by_class, iou_thresholds=None):
+    if iou_thresholds is None:
+        iou_thresholds = np.arange(0.5, 0.96, 0.05)
+
+    per_class_rows = []
+    for cls_id in range(len(CLASSES)):
+        gt_map = gt_by_class.get(cls_id, {})
+        n_gt = sum(len(v) for v in gt_map.values())
+        cls_preds = sorted(pred_by_class.get(cls_id, []), key=lambda x: x["conf"], reverse=True)
+        aps = []
+        p50 = 0.0
+        r50 = 0.0
+        ap50 = 0.0
+
+        for thr in iou_thresholds:
+            matched = {img_id: np.zeros(len(gt_map.get(img_id, [])), dtype=bool) for img_id in gt_map}
+            tps, fps = [], []
+            for pred in cls_preds:
+                img_id = pred["image_id"]
+                gts = gt_map.get(img_id, [])
+                best_iou = 0.0
+                best_j = -1
+                for j, gt_box in enumerate(gts):
+                    ov = iou_xyxy(pred["xyxy"], gt_box)
+                    if ov > best_iou:
+                        best_iou = ov
+                        best_j = j
+                if best_iou >= thr and best_j >= 0 and not matched[img_id][best_j]:
+                    matched[img_id][best_j] = True
+                    tps.append(1.0)
+                    fps.append(0.0)
+                else:
+                    tps.append(0.0)
+                    fps.append(1.0)
+
+            if len(tps) == 0:
+                aps.append(0.0)
+                continue
+            tps = np.cumsum(np.array(tps))
+            fps = np.cumsum(np.array(fps))
+            recalls = tps / max(n_gt, 1)
+            precisions = tps / np.maximum(tps + fps, 1e-9)
+            ap = ap_from_pr(recalls, precisions)
+            aps.append(ap)
+
+            if abs(float(thr) - 0.5) < 1e-9:
+                ap50 = ap
+                p50 = float(precisions[-1]) if len(precisions) else 0.0
+                r50 = float(recalls[-1]) if len(recalls) else 0.0
+
+        per_class_rows.append({
+            "class_id": cls_id,
+            "class_name": CLASSES[cls_id],
+            "precision": p50,
+            "recall": r50,
+            "mAP50": ap50,
+            "mAP50_95": float(np.mean(aps)) if aps else 0.0,
+            "gt_boxes": n_gt,
+        })
+    return per_class_rows
+
+
+def build_gt_for_split(split_name):
+    img_dir = VAL_IMG_DIR if split_name == "val" else TEST_IMG_DIR
+    lbl_dir = VAL_LBL_DIR if split_name == "val" else TEST_LBL_DIR
+    image_paths = sorted(img_dir.glob("*.*"))
+    if HYBRID_EVAL_SAMPLE_SIZE is not None:
+        rng = random.Random(SEED)
+        rng.shuffle(image_paths)
+        image_paths = image_paths[: min(HYBRID_EVAL_SAMPLE_SIZE, len(image_paths))]
+
+    gt_by_class = {i: {} for i in range(len(CLASSES))}
+    for image_path in image_paths:
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        label_path = lbl_dir / f"{image_path.stem}.txt"
+        label_rows = []
+        if label_path.exists():
+            for ln in label_path.read_text().strip().splitlines():
+                parts = ln.strip().split()
+                if len(parts) != 5:
+                    continue
+                cls_id = int(float(parts[0]))
+                xc, yc, bw, bh = map(float, parts[1:])
+                label_rows.append((cls_id, xc, yc, bw, bh))
+        for cls_id, xc, yc, bw, bh in label_rows:
+            x1 = max(0.0, (xc - bw / 2.0) * w)
+            y1 = max(0.0, (yc - bh / 2.0) * h)
+            x2 = min(float(w), (xc + bw / 2.0) * w)
+            y2 = min(float(h), (yc + bh / 2.0) * h)
+            gt_by_class.setdefault(int(cls_id), {}).setdefault(image_path.name, []).append([x1, y1, x2, y2])
+    return image_paths, gt_by_class
+
+
+def run_hybrid_fusion_eval():
+    if not RUN_HYBRID_FUSION:
+        print("Hybrid fusion disabled. Set RUN_HYBRID_FUSION=True to enable late-fusion evaluation.")
+        return pd.DataFrame(), pd.DataFrame()
+    if not RUN_RTDETR_BENCHMARK or "rtdetr_model" not in globals():
+        print("Hybrid fusion skipped: RT-DETR model is unavailable in this run.")
+        return pd.DataFrame(), pd.DataFrame()
+
+    fusion_rows = []
+    fusion_per_class_rows = []
+    for split_name in ["val", "test"]:
+        image_paths, gt_by_class = build_gt_for_split(split_name)
+        pred_by_class = {i: [] for i in range(len(CLASSES))}
+        for image_path in image_paths:
+            y_preds = predict_xyxy(model, image_path, IMG_SIZE, HYBRID_CONF)
+            r_preds = predict_xyxy(rtdetr_model, image_path, RTDETR_IMG_SIZE, HYBRID_CONF)
+            f_preds = hybrid_fuse_predictions(y_preds, r_preds, iou_thr=HYBRID_FUSION_IOU)
+            for pred in f_preds:
+                pred_by_class[pred["cls"]].append({
+                    "image_id": image_path.name,
+                    "conf": float(pred["conf"]),
+                    "xyxy": pred["xyxy"],
+                })
+
+        per_cls = evaluate_predictions(gt_by_class, pred_by_class)
+        for row in per_cls:
+            fusion_per_class_rows.append({
+                "model": "Hybrid YOLOv8n + RT-DETR-L",
+                "family": "YOLO-Transformer late fusion",
+                "split": split_name,
+                **row,
+            })
+
+        macro_p = float(np.mean([r["precision"] for r in per_cls])) if per_cls else 0.0
+        macro_r = float(np.mean([r["recall"] for r in per_cls])) if per_cls else 0.0
+        macro_ap50 = float(np.mean([r["mAP50"] for r in per_cls])) if per_cls else 0.0
+        macro_ap = float(np.mean([r["mAP50_95"] for r in per_cls])) if per_cls else 0.0
+        row = {
+            "model": "Hybrid YOLOv8n + RT-DETR-L",
+            "family": "YOLO-Transformer late fusion",
+            "split": split_name,
+            "precision": macro_p,
+            "recall": macro_r,
+            "mAP50": macro_ap50,
+            "mAP50_95": macro_ap,
+            "images": len(image_paths),
+        }
+        fusion_rows.append(row)
+        print("HYBRID", split_name.upper(), row)
+
+    fusion_df = pd.DataFrame(fusion_rows)
+    fusion_df.to_csv(HYBRID_FUSION_CSV, index=False)
+    fusion_per_class_df = pd.DataFrame(fusion_per_class_rows)
+    fusion_per_class_df.to_csv(HYBRID_PER_CLASS_CSV, index=False)
+    print("Saved hybrid fusion metrics:", HYBRID_FUSION_CSV)
+    print("Saved hybrid per-class metrics:", HYBRID_PER_CLASS_CSV)
+    display(fusion_df)
+    display(fusion_per_class_df)
+
+    architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
+    architecture_df = pd.concat([architecture_df, fusion_df.drop(columns=["images"])], ignore_index=True)
+    architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
+    print("Saved architecture comparison:", ARCHITECTURE_CSV)
+    return fusion_df, fusion_per_class_df
+
+
+def measure_hybrid_latency(image_paths, n=80, warmup=10):
+    sample = image_paths[:]
+    random.shuffle(sample)
+    sample = sample[: min(n, len(sample))]
+    if not sample:
+        return {}
+
+    for p in sample[: min(warmup, len(sample))]:
+        y = predict_xyxy(model, p, IMG_SIZE, HYBRID_CONF)
+        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, HYBRID_CONF)
+        _ = hybrid_fuse_predictions(y, r, iou_thr=HYBRID_FUSION_IOU)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    timings = []
+    for p in sample:
+        start = time.perf_counter()
+        y = predict_xyxy(model, p, IMG_SIZE, HYBRID_CONF)
+        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, HYBRID_CONF)
+        _ = hybrid_fuse_predictions(y, r, iou_thr=HYBRID_FUSION_IOU)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        timings.append((time.perf_counter() - start) * 1000.0)
+
+    return {
+        "images": len(sample),
+        "mean_ms": float(np.mean(timings)),
+        "p50_ms": float(np.percentile(timings, 50)),
+        "p95_ms": float(np.percentile(timings, 95)),
+        "fps": float(1000.0 / np.mean(timings)),
+        "under_100ms_target": bool(np.mean(timings) < 100.0),
+    }
+
+
+hybrid_fusion_df, hybrid_per_class_df = run_hybrid_fusion_eval()
+"""
+    ),
+    code_cell(
+        """
 def read_yolo_label(txt_path: Path):
     if not txt_path.exists():
         return []
@@ -964,6 +1269,8 @@ if RUN_RTDETR_BENCHMARK:
         latency_summary["rtdetr_l"] = measure_latency(
             rtdetr_m, test_paths, RTDETR_IMG_SIZE, n=80, warmup=10, conf=0.25
         )
+if RUN_HYBRID_FUSION and RUN_RTDETR_BENCHMARK and "rtdetr_model" in globals():
+    latency_summary["hybrid_yolo_rtdetr_fusion"] = measure_hybrid_latency(test_paths, n=80, warmup=10)
 
 print("Latency summary:", latency_summary)
 (WORK_DIR / "latency_summary.json").write_text(json.dumps(latency_summary, indent=2))
@@ -991,7 +1298,7 @@ latency_df = load_csv_or_empty(LATENCY_TABLE_CSV)
 
 print("YOLOv8n val/test metrics")
 display(summary_df)
-print("Architecture comparison (YOLOv8n vs RT-DETR-L)")
+print("Architecture comparison (YOLOv8n vs RT-DETR-L vs Hybrid)")
 display(architecture_df)
 print("Robustness metrics")
 display(robustness_df)
@@ -1028,6 +1335,21 @@ if not latency_df.empty:
         "mAP50": np.nan,
         "mAP50_95": np.nan,
     })
+if not architecture_df.empty and not latency_df.empty:
+    hybrid_arch = architecture_df[architecture_df["model"] == "Hybrid YOLOv8n + RT-DETR-L"]
+    hybrid_lat = latency_df[latency_df["model"] == "hybrid_yolo_rtdetr_fusion"]
+    if not hybrid_arch.empty and not hybrid_lat.empty:
+        h_arch = hybrid_arch.sort_values("mAP50_95", ascending=False).iloc[0]
+        h_lat = hybrid_lat.iloc[0]
+        final_summary_rows.append({
+            "summary_item": "Hybrid accuracy-latency tradeoff",
+            "model": h_arch.get("model", ""),
+            "split": h_arch.get("split", ""),
+            "mAP50": h_arch.get("mAP50", np.nan),
+            "mAP50_95": h_arch.get("mAP50_95", np.nan),
+            "mean_latency_ms": h_lat.get("mean_ms", np.nan),
+            "under_100ms_target": h_lat.get("under_100ms_target", False),
+        })
 
 final_summary_df = pd.DataFrame(final_summary_rows)
 final_summary_df.to_csv(FINAL_SUMMARY_CSV, index=False)
@@ -1113,6 +1435,7 @@ traceability = pd.DataFrame([
     ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency per model (YOLOv8n; RT-DETR-L when benchmark runs) and 100 ms pass/fail"],
     ["Provide deployment artifact", "ONNX export plus optional TensorRT export path"],
     ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8n and RT-DETR-L on val and test splits"],
+    ["Implement Hybrid YOLO-Transformer detection", "YOLOv8n proposal detector + RT-DETR-L transformer-style validation/refinement with late-fusion evaluation."],
     ["Provide interpretable visual output", "Ground-truth vs prediction plots and saved prediction gallery"],
 ])
 traceability.columns = ["Proposal requirement", "Notebook implementation"]
