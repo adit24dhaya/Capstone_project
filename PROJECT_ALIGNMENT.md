@@ -17,19 +17,23 @@ Current implementation status:
 - `kaggle_kernel/project.ipynb` prepares the Kaggle PCB dataset from Pascal VOC XML into YOLO format.
 - It downloads and verifies DsPCBSD+ from Figshare DOI `10.6084/m9.figshare.24970329.v1`, then merges the overlapping real-image categories into the project taxonomy.
 - It creates stratified `train`, `val`, and `test` splits by defect folder.
+- It generates copy-paste synthetic defect images for weak/rare classes as a practical TransGAN-style class-balancing surrogate, while leaving validation and test data untouched.
 - It trains YOLOv8 on Kaggle GPU with small-defect-oriented augmentation.
 - It evaluates both validation and held-out test metrics.
 - It runs Albumentations-based robustness tests for brightness/contrast, Gaussian noise, motion blur, and rotation.
-- It writes `project_metrics_summary.csv`, `architecture_comparison.csv` (YOLOv8n, RT-DETR-L, and Hybrid rows for **val** and **test**), `robustness_metrics.csv`, `per_class_metrics.csv`, `hybrid_fusion_metrics.csv`, `hybrid_per_class_metrics.csv`, `latency_summary.json`, `latency_comparison.csv`, `final_results_summary.csv`, `deployment_exports.json`, and `requirements_traceability.csv`.
+- It writes `project_metrics_summary.csv`, `architecture_comparison.csv` (YOLOv8n, RT-DETR-L, Hybrid, and CNN-Transformer refined hybrid rows for **val** and **test**), `synthetic_augmentation_summary.csv`, `robustness_metrics.csv`, `per_class_metrics.csv`, `hybrid_tuning_grid.csv`, `hybrid_selected_config.json`, `hybrid_selected_test_metrics.csv`, `hybrid_selected_per_class_metrics.csv`, `hybrid_fusion_metrics.csv`, `hybrid_per_class_metrics.csv`, `hybrid_robustness_metrics.csv`, `hybrid_robustness_per_class_metrics.csv`, `hybrid_error_analysis.csv`, `hybrid_error_examples.csv`, `hybrid_class_delta.csv`, `cnn_transformer_refiner_training.csv`, `cnn_transformer_refined_hybrid_metrics.csv`, `cnn_transformer_refined_hybrid_per_class.csv`, `latency_summary.json`, `latency_comparison.csv`, `final_results_summary.csv`, `deployment_exports.json`, `jetson_deployment_status.json`, and `requirements_traceability.csv`.
 - It exports the trained model to ONNX.
 - It enables a `RUN_RTDETR_BENCHMARK` switch for a transformer-style RT-DETR comparison phase, addressing the CNN-vs-Transformer requirement from the survey.
+- It tunes hybrid fusion on validation data only, evaluates the selected configuration once on test data, runs selected-hybrid robustness tests, and saves visual/error-analysis artifacts.
+- It includes a custom CNN-Transformer patch-level feature refiner that learns from defect/background crops and filters/refines fused detector outputs.
 - It includes an optional `RUN_TENSORRT_EXPORT` switch, with final Jetson TensorRT export expected to be rebuilt on the Jetson target.
 
 Remaining high-value milestones:
 
 - Run the RT-DETR/robustness version to completion and compare its `architecture_comparison.csv` and `robustness_metrics.csv` results against YOLOv8.
+- Run the tuned hybrid + synthetic augmentation + CNN-Transformer refiner version to completion and compare `hybrid_selected_test_metrics.csv`, `hybrid_robustness_metrics.csv`, and `cnn_transformer_refined_hybrid_metrics.csv` against the version 8 late-fusion hybrid.
 - Rotate the Kaggle access token because it was visible during setup.
-- Build the TensorRT engine directly on Jetson Orin for the final deployment demo.
+- Build the TensorRT engine directly on Jetson Orin for the final deployment demo, or report `jetson_deployment_status.json` as evidence that the deployment path is prepared and hardware-specific TensorRT build remains target-side.
 - Add final report plots/tables from the generated CSV/JSON artifacts.
 
 Dataset-improvement note:
@@ -40,7 +44,7 @@ Dataset-improvement note:
 
 Architecture wording note:
 
-- To avoid over-claiming, the implementation is described as: *YOLOv8n CNN baseline + RT-DETR-L transformer-style benchmark*, not a custom fused YOLO-Transformer backbone.
-- Hybrid support is now implemented as a **YOLO-Transformer late-fusion pipeline** (decision-level model fusion), not a custom fused neural backbone.
-- In the latest benchmark run, RT-DETR-L improved test mAP50 (0.853 -> 0.878) and mAP50-95 (0.442 -> 0.479), while remaining slower than YOLOv8n.
+- The implementation includes three architecture levels: *YOLOv8n CNN baseline*, *RT-DETR-L transformer-style benchmark*, and *YOLO-Transformer late fusion*.
+- The next phase tunes the late-fusion hybrid and adds a custom feature-level CNN-Transformer patch refiner. This is a real learned CNN-Transformer module for proposal validation/refinement, but it is still not a fully custom end-to-end detector backbone.
+- In the latest completed benchmark run, RT-DETR-L improved test mAP50 (0.853 -> 0.879) and mAP50-95 (0.442 -> 0.488), while remaining slower than YOLOv8n.
 - Gaussian noise remains the weakest robustness condition and is tracked as a current limitation.
