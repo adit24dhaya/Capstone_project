@@ -102,11 +102,16 @@ HYBRID_CONF = 0.01
 HYBRID_FUSION_IOU = 0.55
 HYBRID_EVAL_SAMPLE_SIZE = None
 RUN_HYBRID_TUNING = True
-HYBRID_TUNING_CONF_VALUES = [0.05, 0.10, 0.20, 0.30]
-HYBRID_TUNING_IOU_VALUES = [0.45, 0.55, 0.65]
-HYBRID_TUNING_MODES = ["agreement_only", "weighted_fusion", "union_high_conf"]
+HYBRID_TUNING_CONF_VALUES = [0.15, 0.20, 0.25, 0.30]
+HYBRID_TUNING_IOU_VALUES = [0.40, 0.45, 0.55]
+HYBRID_TUNING_MODES = ["agreement_only", "weighted_fusion", "single_high_conf_fallback", "class_weighted_fusion"]
 HYBRID_TUNING_NMS_VALUES = [0.45, 0.60]
-HYBRID_MIN_PRECISION_FOR_SELECTION = 0.50
+HYBRID_TUNING_SINGLE_MODEL_CONF_VALUES = [0.50, 0.60, 0.70]
+HYBRID_TUNING_PER_CLASS_PROFILES = ["uniform", "precision_boost", "aggressive_precision"]
+HYBRID_TUNING_PRECISION_FLOORS = [0.65, 0.70, 0.75]
+HYBRID_MIN_PRECISION_FOR_SELECTION = 0.65
+HYBRID_MIN_RECALL_FOR_SELECTION = 0.78
+HYBRID_MIN_MAP50_FOR_SELECTION = 0.82
 HYBRID_TUNING_SAMPLE_SIZE = 350
 HYBRID_VISUAL_SAMPLE_SIZE = 12
 RUN_CNN_TRANSFORMER_REFINER = True
@@ -172,6 +177,10 @@ HYBRID_TUNING_GRID_CSV = WORK_DIR / "hybrid_tuning_grid.csv"
 HYBRID_SELECTED_CONFIG_JSON = WORK_DIR / "hybrid_selected_config.json"
 HYBRID_SELECTED_TEST_CSV = WORK_DIR / "hybrid_selected_test_metrics.csv"
 HYBRID_SELECTED_PER_CLASS_CSV = WORK_DIR / "hybrid_selected_per_class_metrics.csv"
+HYBRID_TUNING_GRID_V2_CSV = WORK_DIR / "hybrid_tuning_grid_v2.csv"
+HYBRID_SELECTED_CONFIG_V2_JSON = WORK_DIR / "hybrid_selected_config_v2.json"
+HYBRID_SELECTED_TEST_V2_CSV = WORK_DIR / "hybrid_selected_test_metrics_v2.csv"
+HYBRID_ERROR_ANALYSIS_V2_CSV = WORK_DIR / "hybrid_error_analysis_v2.csv"
 HYBRID_ROBUSTNESS_CSV = WORK_DIR / "hybrid_robustness_metrics.csv"
 HYBRID_ROBUSTNESS_PER_CLASS_CSV = WORK_DIR / "hybrid_robustness_per_class_metrics.csv"
 HYBRID_ERROR_ANALYSIS_CSV = WORK_DIR / "hybrid_error_analysis.csv"
@@ -1080,12 +1089,84 @@ def default_hybrid_config():
         "fusion_iou": HYBRID_FUSION_IOU,
         "mode": "weighted_fusion",
         "nms_iou": 0.60,
+        "single_model_conf": 0.60,
+        "per_class_profile": "uniform",
+        "per_class_conf": {},
+        "model_class_weights": {},
     }
 
 
-def weighted_box_merge(y, r):
-    wy = max(float(y["conf"]), 1e-6)
-    wr = max(float(r["conf"]), 1e-6)
+def load_validation_per_class_metrics():
+    if not PER_CLASS_CSV.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(PER_CLASS_CSV)
+    except Exception:
+        return pd.DataFrame()
+    if "split" not in df.columns:
+        return pd.DataFrame()
+    return df[df["split"] == "val"].copy()
+
+
+def build_model_class_weights(val_per_class_df):
+    weights = {
+        "yolo": {str(i): 1.0 for i in range(len(CLASSES))},
+        "rtdetr": {str(i): 1.0 for i in range(len(CLASSES))},
+    }
+    if val_per_class_df.empty:
+        return weights
+
+    model_map = {
+        "YOLOv8n": "yolo",
+        "RT-DETR-L": "rtdetr",
+    }
+    for model_name, key in model_map.items():
+        rows = val_per_class_df[val_per_class_df["model"] == model_name]
+        for _, row in rows.iterrows():
+            cls_id = int(row["class_id"])
+            score = float(row.get("mAP50_95", row.get("mAP50", 0.5)))
+            weights[key][str(cls_id)] = float(np.clip(0.35 + score, 0.50, 1.35))
+    return weights
+
+
+def build_per_class_conf_profile(base_conf, profile_name, val_per_class_df):
+    if profile_name == "uniform" or val_per_class_df.empty:
+        return {str(i): float(base_conf) for i in range(len(CLASSES))}
+
+    thresholds = {}
+    for cls_id in range(len(CLASSES)):
+        cls_rows = val_per_class_df[val_per_class_df["class_id"] == cls_id]
+        if cls_rows.empty:
+            thresholds[str(cls_id)] = float(base_conf)
+            continue
+        best_precision = float(cls_rows["precision"].max()) if "precision" in cls_rows else 0.65
+        best_recall = float(cls_rows["recall"].max()) if "recall" in cls_rows else 0.65
+        best_map = float(cls_rows["mAP50_95"].max()) if "mAP50_95" in cls_rows else 0.45
+        false_positive_pressure = max(0.0, 0.82 - best_precision)
+        weak_localization_pressure = max(0.0, 0.48 - best_map)
+        recall_guard = -0.05 if best_recall < 0.70 else 0.0
+        intensity = 0.20 if profile_name == "precision_boost" else 0.32
+        threshold = base_conf + intensity * false_positive_pressure + 0.35 * weak_localization_pressure + recall_guard
+        thresholds[str(cls_id)] = float(np.clip(threshold, base_conf, 0.85))
+    return thresholds
+
+
+def get_class_conf_threshold(config, cls_id):
+    base_conf = float(config.get("conf", HYBRID_CONF))
+    per_class_conf = config.get("per_class_conf") or {}
+    return max(base_conf, float(per_class_conf.get(str(int(cls_id)), base_conf)))
+
+
+def get_model_class_weight(config, model_key, cls_id):
+    model_weights = config.get("model_class_weights") or {}
+    return float(model_weights.get(model_key, {}).get(str(int(cls_id)), 1.0))
+
+
+def weighted_box_merge(y, r, config=None):
+    config = config or {}
+    cls_id = int(y["cls"])
+    wy = max(float(y["conf"]), 1e-6) * get_model_class_weight(config, "yolo", cls_id)
+    wr = max(float(r["conf"]), 1e-6) * get_model_class_weight(config, "rtdetr", cls_id)
     denom = wy + wr
     fused_xyxy = [
         (wy * y["xyxy"][0] + wr * r["xyxy"][0]) / denom,
@@ -1093,14 +1174,17 @@ def weighted_box_merge(y, r):
         (wy * y["xyxy"][2] + wr * r["xyxy"][2]) / denom,
         (wy * y["xyxy"][3] + wr * r["xyxy"][3]) / denom,
     ]
-    fused_conf = min(1.0, max(float(y["conf"]), float(r["conf"])) + 0.05)
-    return {"cls": int(y["cls"]), "conf": float(fused_conf), "xyxy": fused_xyxy, "sources": "yolo+rtdetr"}
+    y_score = float(y["conf"]) * get_model_class_weight(config, "yolo", cls_id)
+    r_score = float(r["conf"]) * get_model_class_weight(config, "rtdetr", cls_id)
+    fused_conf = min(1.0, max(y_score, r_score, (y_score + r_score) / 2.0) + 0.05)
+    return {"cls": cls_id, "conf": float(fused_conf), "xyxy": fused_xyxy, "sources": "yolo+rtdetr"}
 
 
 def fuse_class_boxes_config(yolo_boxes, rtdetr_boxes, config):
     conf_thr = float(config.get("conf", HYBRID_CONF))
     iou_thr = float(config.get("fusion_iou", HYBRID_FUSION_IOU))
     mode = config.get("mode", "weighted_fusion")
+    single_model_conf = float(config.get("single_model_conf", max(conf_thr, 0.60)))
 
     yolo_boxes = [b for b in yolo_boxes if float(b["conf"]) >= conf_thr]
     rtdetr_boxes = [b for b in rtdetr_boxes if float(b["conf"]) >= conf_thr]
@@ -1120,22 +1204,32 @@ def fuse_class_boxes_config(yolo_boxes, rtdetr_boxes, config):
         if best_idx >= 0 and best_iou >= iou_thr:
             r = rtdetr_boxes[best_idx]
             used_r.add(best_idx)
-            fused.append(weighted_box_merge(y, r))
-        elif mode in {"weighted_fusion", "union_high_conf"}:
-            keep_thr = conf_thr if mode == "weighted_fusion" else max(conf_thr, 0.25)
+            fused.append(weighted_box_merge(y, r, config))
+        elif mode in {"weighted_fusion", "union_high_conf", "single_high_conf_fallback", "class_weighted_fusion"}:
+            if mode == "weighted_fusion":
+                keep_thr = conf_thr
+            elif mode == "union_high_conf":
+                keep_thr = max(conf_thr, 0.25)
+            else:
+                keep_thr = max(conf_thr, single_model_conf)
             if float(y["conf"]) >= keep_thr:
                 out = dict(y)
                 out["sources"] = "yolo"
                 fused.append(out)
 
-    if mode in {"weighted_fusion", "union_high_conf"}:
-        keep_thr = conf_thr if mode == "weighted_fusion" else max(conf_thr, 0.25)
+    if mode in {"weighted_fusion", "union_high_conf", "single_high_conf_fallback", "class_weighted_fusion"}:
+        if mode == "weighted_fusion":
+            keep_thr = conf_thr
+        elif mode == "union_high_conf":
+            keep_thr = max(conf_thr, 0.25)
+        else:
+            keep_thr = max(conf_thr, single_model_conf)
         for idx, r in enumerate(rtdetr_boxes):
             if idx not in used_r and float(r["conf"]) >= keep_thr:
                 out = dict(r)
                 out["sources"] = "rtdetr"
                 fused.append(out)
-    return fused
+    return [b for b in fused if float(b["conf"]) >= get_class_conf_threshold(config, b["cls"])]
 
 
 def hybrid_fuse_predictions_config(yolo_preds, rtdetr_preds, config):
@@ -1301,10 +1395,42 @@ def summarize_per_class_rows(per_cls):
     return precision, recall, mAP50, mAP50_95, f1
 
 
+def f_beta_score(precision, recall, beta=0.5):
+    beta_sq = beta * beta
+    return float((1.0 + beta_sq) * precision * recall / max(beta_sq * precision + recall, 1e-9))
+
+
+def count_detection_errors_at_iou(gt_by_class, pred_by_class, iou_thr=0.50):
+    tp = fp = fn = 0
+    for cls_id in range(len(CLASSES)):
+        gt_map = gt_by_class.get(cls_id, {})
+        cls_preds = sorted(pred_by_class.get(cls_id, []), key=lambda x: x["conf"], reverse=True)
+        matched = {img_id: np.zeros(len(gt_map.get(img_id, [])), dtype=bool) for img_id in gt_map}
+        for pred in cls_preds:
+            img_id = pred["image_id"]
+            gts = gt_map.get(img_id, [])
+            best_iou = 0.0
+            best_j = -1
+            for j, gt_box in enumerate(gts):
+                ov = iou_xyxy(pred["xyxy"], gt_box)
+                if ov > best_iou:
+                    best_iou = ov
+                    best_j = j
+            if best_iou >= iou_thr and best_j >= 0 and not matched[img_id][best_j]:
+                matched[img_id][best_j] = True
+                tp += 1
+            else:
+                fp += 1
+        for flags in matched.values():
+            fn += int((~flags).sum())
+    return tp, fp, fn
+
+
 def evaluate_cached_hybrid(cache, gt_by_class, config, split_name, model_name="Hybrid YOLOv8n + RT-DETR-L"):
     pred_by_class, preds_by_image = predictions_from_cache(cache, config)
     per_cls = evaluate_predictions(gt_by_class, pred_by_class)
     precision, recall, mAP50, mAP50_95, f1 = summarize_per_class_rows(per_cls)
+    tp, fp, fn = count_detection_errors_at_iou(gt_by_class, pred_by_class)
     row = {
         "model": model_name,
         "family": "YOLO-Transformer tuned late fusion",
@@ -1312,13 +1438,21 @@ def evaluate_cached_hybrid(cache, gt_by_class, config, split_name, model_name="H
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "f0_5": f_beta_score(precision, recall, beta=0.5),
         "mAP50": mAP50,
         "mAP50_95": mAP50_95,
+        "tp_iou50": tp,
+        "fp_iou50": fp,
+        "fn_iou50": fn,
+        "false_positives_per_image": float(fp / max(len(cache), 1)),
         "images": len(cache),
         "conf": float(config.get("conf", HYBRID_CONF)),
         "fusion_iou": float(config.get("fusion_iou", HYBRID_FUSION_IOU)),
         "fusion_mode": config.get("mode", "weighted_fusion"),
         "nms_iou": float(config.get("nms_iou", 0.60)),
+        "single_model_conf": float(config.get("single_model_conf", np.nan)),
+        "per_class_profile": config.get("per_class_profile", "uniform"),
+        "model_weight_profile": config.get("model_weight_profile", "equal"),
     }
     return row, per_cls, pred_by_class, preds_by_image
 
@@ -1327,48 +1461,100 @@ def tune_hybrid_config():
     if not RUN_HYBRID_TUNING:
         config = default_hybrid_config()
         HYBRID_SELECTED_CONFIG_JSON.write_text(json.dumps(config, indent=2))
+        HYBRID_SELECTED_CONFIG_V2_JSON.write_text(json.dumps(config, indent=2))
         return config, pd.DataFrame()
 
     val_paths, gt_by_class = build_gt_for_split("val", sample_size=HYBRID_TUNING_SAMPLE_SIZE)
     min_conf = min(HYBRID_TUNING_CONF_VALUES)
     cache = collect_hybrid_prediction_cache(val_paths, min_conf)
+    val_per_class_df = load_validation_per_class_metrics()
+    model_class_weights = build_model_class_weights(val_per_class_df)
     rows = []
     for conf in HYBRID_TUNING_CONF_VALUES:
         for fusion_iou in HYBRID_TUNING_IOU_VALUES:
             for mode in HYBRID_TUNING_MODES:
-                for nms_iou in HYBRID_TUNING_NMS_VALUES:
-                    config = {
-                        "conf": float(conf),
-                        "fusion_iou": float(fusion_iou),
-                        "mode": mode,
-                        "nms_iou": float(nms_iou),
-                    }
-                    row, _, _, _ = evaluate_cached_hybrid(cache, gt_by_class, config, "val_tuning")
-                    rows.append(row)
-                    print("HYBRID_TUNE", row)
+                single_model_values = HYBRID_TUNING_SINGLE_MODEL_CONF_VALUES if mode in {"single_high_conf_fallback", "class_weighted_fusion"} else [0.60]
+                for single_model_conf in single_model_values:
+                    for profile_name in HYBRID_TUNING_PER_CLASS_PROFILES:
+                        per_class_conf = build_per_class_conf_profile(conf, profile_name, val_per_class_df)
+                        for nms_iou in HYBRID_TUNING_NMS_VALUES:
+                            config = {
+                                "conf": float(conf),
+                                "fusion_iou": float(fusion_iou),
+                                "mode": mode,
+                                "nms_iou": float(nms_iou),
+                                "single_model_conf": float(single_model_conf),
+                                "per_class_profile": profile_name,
+                                "per_class_conf": per_class_conf,
+                                "model_weight_profile": "val_mAP50_95" if mode == "class_weighted_fusion" else "equal",
+                                "model_class_weights": model_class_weights if mode == "class_weighted_fusion" else {},
+                            }
+                            row, _, _, _ = evaluate_cached_hybrid(cache, gt_by_class, config, "val_tuning")
+                            row["per_class_conf_json"] = json.dumps(per_class_conf, sort_keys=True)
+                            rows.append(row)
+                            print("HYBRID_TUNE_V2", row)
 
     grid_df = pd.DataFrame(rows)
     grid_df.to_csv(HYBRID_TUNING_GRID_CSV, index=False)
-    display(grid_df.sort_values(["precision", "mAP50_95"], ascending=False).head(12))
+    grid_df.to_csv(HYBRID_TUNING_GRID_V2_CSV, index=False)
+    display(grid_df.sort_values(["precision", "f0_5", "mAP50_95"], ascending=False).head(12))
     print("Saved hybrid tuning grid:", HYBRID_TUNING_GRID_CSV)
+    print("Saved hybrid tuning grid v2:", HYBRID_TUNING_GRID_V2_CSV)
 
-    eligible = grid_df[grid_df["precision"] >= HYBRID_MIN_PRECISION_FOR_SELECTION]
-    sort_cols = ["mAP50_95", "f1", "precision"]
-    if eligible.empty:
-        selected = grid_df.sort_values(["f1", "mAP50_95", "precision"], ascending=False).iloc[0]
-    else:
-        selected = eligible.sort_values(sort_cols, ascending=False).iloc[0]
+    selected = None
+    selection_floor = None
+    selection_metric = ""
+    sort_cols = ["f0_5", "mAP50_95", "f1", "precision", "recall", "false_positives_per_image"]
+    sort_ascending = [False, False, False, False, False, True]
+    for floor in sorted(HYBRID_TUNING_PRECISION_FLOORS, reverse=True):
+        candidates = grid_df[
+            (grid_df["precision"] >= floor)
+            & (grid_df["recall"] >= HYBRID_MIN_RECALL_FOR_SELECTION)
+            & (grid_df["mAP50"] >= HYBRID_MIN_MAP50_FOR_SELECTION)
+        ]
+        if not candidates.empty:
+            selected = candidates.sort_values(sort_cols, ascending=sort_ascending).iloc[0]
+            selection_floor = floor
+            selection_metric = "f0_5_with_precision_recall_map_floor"
+            break
 
+    if selected is None:
+        eligible = grid_df[grid_df["precision"] >= HYBRID_MIN_PRECISION_FOR_SELECTION]
+        if eligible.empty:
+            selected = grid_df.sort_values(sort_cols, ascending=sort_ascending).iloc[0]
+            selection_floor = HYBRID_MIN_PRECISION_FOR_SELECTION
+            selection_metric = "f0_5_fallback_no_precision_floor_match"
+        else:
+            selected = eligible.sort_values(sort_cols, ascending=sort_ascending).iloc[0]
+            selection_floor = HYBRID_MIN_PRECISION_FOR_SELECTION
+            selection_metric = "f0_5_with_precision_floor"
+
+    per_class_conf = json.loads(str(selected.get("per_class_conf_json", "{}")))
     selected_config = {
         "conf": float(selected["conf"]),
         "fusion_iou": float(selected["fusion_iou"]),
         "mode": str(selected["fusion_mode"]),
         "nms_iou": float(selected["nms_iou"]),
+        "single_model_conf": float(selected["single_model_conf"]),
+        "per_class_profile": str(selected["per_class_profile"]),
+        "per_class_conf": per_class_conf,
+        "model_weight_profile": str(selected["model_weight_profile"]),
+        "model_class_weights": model_class_weights if str(selected["fusion_mode"]) == "class_weighted_fusion" else {},
         "selection_split": "val",
-        "selection_metric": "mAP50_95_with_precision_floor" if not eligible.empty else "f1_fallback_no_precision_floor_match",
-        "precision_floor": HYBRID_MIN_PRECISION_FOR_SELECTION,
+        "selection_metric": selection_metric,
+        "precision_floor": selection_floor,
+        "minimum_recall": HYBRID_MIN_RECALL_FOR_SELECTION,
+        "minimum_mAP50": HYBRID_MIN_MAP50_FOR_SELECTION,
+        "selection_sample_size": len(val_paths),
+        "validation_precision": float(selected["precision"]),
+        "validation_recall": float(selected["recall"]),
+        "validation_f0_5": float(selected["f0_5"]),
+        "validation_mAP50": float(selected["mAP50"]),
+        "validation_mAP50_95": float(selected["mAP50_95"]),
+        "validation_false_positives_per_image": float(selected["false_positives_per_image"]),
     }
     HYBRID_SELECTED_CONFIG_JSON.write_text(json.dumps(selected_config, indent=2))
+    HYBRID_SELECTED_CONFIG_V2_JSON.write_text(json.dumps(selected_config, indent=2))
     print("Selected hybrid config:", selected_config)
     return selected_config, grid_df
 
@@ -1397,6 +1583,9 @@ def run_selected_hybrid_eval(selected_config):
                 "fusion_iou": selected_config["fusion_iou"],
                 "fusion_mode": selected_config["mode"],
                 "nms_iou": selected_config["nms_iou"],
+                "single_model_conf": selected_config.get("single_model_conf"),
+                "per_class_profile": selected_config.get("per_class_profile", "uniform"),
+                "model_weight_profile": selected_config.get("model_weight_profile", "equal"),
             })
         if split_name == "test":
             selected_test_row = row
@@ -1411,6 +1600,7 @@ def run_selected_hybrid_eval(selected_config):
     fusion_df.to_csv(HYBRID_FUSION_CSV, index=False)
     fusion_per_class_df.to_csv(HYBRID_PER_CLASS_CSV, index=False)
     pd.DataFrame([selected_test_row]).to_csv(HYBRID_SELECTED_TEST_CSV, index=False)
+    pd.DataFrame([selected_test_row]).to_csv(HYBRID_SELECTED_TEST_V2_CSV, index=False)
     pd.DataFrame([
         {
             "model": "Hybrid YOLOv8n + RT-DETR-L",
@@ -1421,11 +1611,15 @@ def run_selected_hybrid_eval(selected_config):
             "fusion_iou": selected_config["fusion_iou"],
             "fusion_mode": selected_config["mode"],
             "nms_iou": selected_config["nms_iou"],
+            "single_model_conf": selected_config.get("single_model_conf"),
+            "per_class_profile": selected_config.get("per_class_profile", "uniform"),
+            "model_weight_profile": selected_config.get("model_weight_profile", "equal"),
         }
         for row in selected_test_per_cls
     ]).to_csv(HYBRID_SELECTED_PER_CLASS_CSV, index=False)
     print("Saved hybrid fusion metrics:", HYBRID_FUSION_CSV)
     print("Saved selected hybrid test metrics:", HYBRID_SELECTED_TEST_CSV)
+    print("Saved selected hybrid test metrics v2:", HYBRID_SELECTED_TEST_V2_CSV)
     print("Saved selected hybrid per-class metrics:", HYBRID_SELECTED_PER_CLASS_CSV)
     display(fusion_df)
     display(fusion_per_class_df)
@@ -1622,8 +1816,10 @@ def detection_error_analysis(gt_by_class, pred_by_class, preds_by_image, per_cla
     error_df = pd.DataFrame(rows)
     examples_df = pd.DataFrame(examples)
     error_df.to_csv(HYBRID_ERROR_ANALYSIS_CSV, index=False)
+    error_df.to_csv(HYBRID_ERROR_ANALYSIS_V2_CSV, index=False)
     examples_df.to_csv(HYBRID_ERROR_EXAMPLES_CSV, index=False)
     print("Saved hybrid error analysis:", HYBRID_ERROR_ANALYSIS_CSV)
+    print("Saved hybrid error analysis v2:", HYBRID_ERROR_ANALYSIS_V2_CSV)
     print("Saved hybrid error examples:", HYBRID_ERROR_EXAMPLES_CSV)
 
     yolo_pc = pd.read_csv(PER_CLASS_CSV) if PER_CLASS_CSV.exists() else pd.DataFrame()
@@ -2429,7 +2625,7 @@ traceability = pd.DataFrame([
     ["Provide deployment artifact", "ONNX export plus Jetson/TensorRT deployment status in jetson_deployment_status.json; final TensorRT engine should be built on Jetson Orin"],
     ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8n and RT-DETR-L on val and test splits"],
     ["Implement Hybrid YOLO-Transformer detection", "YOLOv8n proposal detector + RT-DETR-L transformer-style validation/refinement with tuned late-fusion evaluation."],
-    ["Tune hybrid model using validation only", "hybrid_tuning_grid.csv sweeps confidence, fusion IoU, fusion mode, and class-aware NMS; hybrid_selected_config.json stores the selected validation config; hybrid_selected_test_metrics.csv evaluates that config on test"],
+    ["Tune hybrid model using validation only", "hybrid_tuning_grid.csv and hybrid_tuning_grid_v2.csv sweep confidence, fusion IoU, fusion mode, single-model fallback confidence, per-class thresholds, class-aware NMS, and class-weighted fusion; hybrid_selected_config.json and hybrid_selected_config_v2.json store the validation-selected F0.5/precision-floor config; hybrid_selected_test_metrics_v2.csv evaluates that config on test"],
     ["Analyze hybrid errors", "hybrid_error_analysis.csv, hybrid_error_examples.csv, and hybrid_class_delta.csv summarize false positives, missed defects, and class-level gains/failures"],
     ["Implement custom feature-level CNN-Transformer model", "Trains a custom CNN-Transformer patch refiner on defect/background crops and evaluates refined hybrid predictions in cnn_transformer_refined_hybrid_metrics.csv"],
     ["Provide interpretable visual output", "Ground-truth vs YOLO vs RT-DETR vs tuned hybrid comparison panels saved under hybrid_visual_evidence plus standard prediction gallery"],
