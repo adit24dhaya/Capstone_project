@@ -180,6 +180,9 @@ HYBRID_SELECTED_PER_CLASS_CSV = WORK_DIR / "hybrid_selected_per_class_metrics.cs
 HYBRID_TUNING_GRID_V2_CSV = WORK_DIR / "hybrid_tuning_grid_v2.csv"
 HYBRID_SELECTED_CONFIG_V2_JSON = WORK_DIR / "hybrid_selected_config_v2.json"
 HYBRID_SELECTED_TEST_V2_CSV = WORK_DIR / "hybrid_selected_test_metrics_v2.csv"
+HYBRID_PARETO_FRONTIER_CSV = WORK_DIR / "hybrid_pareto_frontier.csv"
+HYBRID_SELECTED_PROFILES_CONFIG_JSON = WORK_DIR / "hybrid_selected_profiles_config.json"
+HYBRID_SELECTED_PROFILES_TEST_CSV = WORK_DIR / "hybrid_selected_profiles_test_metrics.csv"
 HYBRID_ERROR_ANALYSIS_V2_CSV = WORK_DIR / "hybrid_error_analysis_v2.csv"
 HYBRID_ROBUSTNESS_CSV = WORK_DIR / "hybrid_robustness_metrics.csv"
 HYBRID_ROBUSTNESS_PER_CLASS_CSV = WORK_DIR / "hybrid_robustness_per_class_metrics.csv"
@@ -1457,6 +1460,151 @@ def evaluate_cached_hybrid(cache, gt_by_class, config, split_name, model_name="H
     return row, per_cls, pred_by_class, preds_by_image
 
 
+def compute_pareto_frontier_hybrid_grid(grid_df):
+    # Non-dominated configs: maximize precision, recall, mAP50_95; minimize false_positives_per_image.
+    if grid_df is None or grid_df.empty:
+        return pd.DataFrame()
+    cols = ["precision", "recall", "mAP50_95", "false_positives_per_image"]
+    X = grid_df[cols].values.astype(np.float64)
+    n = len(X)
+    keep = np.ones(n, dtype=bool)
+    eps = 1e-12
+    for i in range(n):
+        if not keep[i]:
+            continue
+        for j in range(n):
+            if i == j or not keep[j]:
+                continue
+            ge_p = X[j, 0] >= X[i, 0] - eps
+            ge_r = X[j, 1] >= X[i, 1] - eps
+            ge_m = X[j, 2] >= X[i, 2] - eps
+            le_fp = X[j, 3] <= X[i, 3] + eps
+            strict = (
+                (X[j, 0] > X[i, 0] + eps)
+                or (X[j, 1] > X[i, 1] + eps)
+                or (X[j, 2] > X[i, 2] + eps)
+                or (X[j, 3] < X[i, 3] - eps)
+            )
+            if ge_p and ge_r and ge_m and le_fp and strict:
+                keep[i] = False
+                break
+    return grid_df.loc[keep].reset_index(drop=True)
+
+
+def grid_row_to_hybrid_config(row, model_class_weights):
+    per_class_conf = json.loads(str(row.get("per_class_conf_json", "{}")))
+    mode = str(row["fusion_mode"])
+    return {
+        "conf": float(row["conf"]),
+        "fusion_iou": float(row["fusion_iou"]),
+        "mode": mode,
+        "nms_iou": float(row["nms_iou"]),
+        "single_model_conf": float(row["single_model_conf"]),
+        "per_class_profile": str(row["per_class_profile"]),
+        "per_class_conf": per_class_conf,
+        "model_weight_profile": str(row["model_weight_profile"]),
+        "model_class_weights": model_class_weights if mode == "class_weighted_fusion" else {},
+    }
+
+
+def select_validation_profile_rows_v11(grid_df):
+    # Pick three validation-only profiles from the same grid as hybrid_tuning_grid_v2.
+    out = {}
+
+    sub = grid_df[grid_df["recall"] >= 0.90]
+    meta = {"constraints_satisfied": True, "rule": "high_recall: recall >= 0.90; maximize mAP50_95 then F1"}
+    if sub.empty:
+        row = grid_df.sort_values(["recall", "mAP50_95", "f1"], ascending=[False, False, False]).iloc[0]
+        meta["constraints_satisfied"] = False
+        meta["note"] = "No grid point met recall>=0.90; fell back to best recall, mAP50_95, F1."
+    else:
+        row = sub.sort_values(["mAP50_95", "f1"], ascending=[False, False]).iloc[0]
+    out["high_recall"] = (row, meta)
+
+    sub = grid_df[(grid_df["precision"] >= 0.82) & (grid_df["recall"] >= 0.86)]
+    meta = {"constraints_satisfied": True, "rule": "balanced: precision >= 0.82 and recall >= 0.86; maximize mAP50_95 then F1"}
+    if sub.empty:
+        tmp = grid_df.copy()
+        tmp["_vio"] = np.maximum(0, 0.82 - tmp["precision"]) + np.maximum(0, 0.86 - tmp["recall"])
+        row = tmp.sort_values(["_vio", "mAP50_95", "f1"], ascending=[True, False, False]).iloc[0]
+        meta["constraints_satisfied"] = False
+        meta["note"] = "No grid point met both floors; minimized constraint violation then mAP50_95, F1."
+    else:
+        row = sub.sort_values(["mAP50_95", "f1"], ascending=[False, False]).iloc[0]
+    out["balanced"] = (row, meta)
+
+    sub = grid_df[grid_df["precision"] >= 0.88]
+    meta = {"constraints_satisfied": True, "rule": "high_precision: precision >= 0.88; maximize F0.5 then mAP50_95"}
+    if sub.empty:
+        row = grid_df.sort_values(["precision", "f0_5", "mAP50_95"], ascending=[False, False, False]).iloc[0]
+        meta["constraints_satisfied"] = False
+        meta["note"] = "No grid point met precision>=0.88; fell back to best precision, F0.5, mAP50_95."
+    else:
+        row = sub.sort_values(["f0_5", "mAP50_95"], ascending=[False, False]).iloc[0]
+    out["high_precision"] = (row, meta)
+
+    return out
+
+
+def run_hybrid_pareto_v11_profiles(grid_df, model_class_weights):
+    # v11: Pareto frontier CSV + three validation profiles + one test eval each (v10 artifact paths unchanged).
+    pareto_df = compute_pareto_frontier_hybrid_grid(grid_df)
+    pareto_df.to_csv(HYBRID_PARETO_FRONTIER_CSV, index=False)
+    print("Saved hybrid Pareto frontier (v11):", HYBRID_PARETO_FRONTIER_CSV)
+
+    selections = select_validation_profile_rows_v11(grid_df)
+    test_paths, gt_test = build_gt_for_split("test")
+    min_conf = min(float(selections[k][0]["conf"]) for k in selections)
+    cache_test = collect_hybrid_prediction_cache(test_paths, min_conf)
+
+    payload = {
+        "version": "v11_hybrid_pareto_profiles",
+        "description": "Validation-selected profiles from hybrid_tuning_grid_v2; test evaluated once per profile.",
+        "pareto_frontier_rows": int(len(pareto_df)),
+        "test_images": len(test_paths),
+        "prediction_cache_min_conf": min_conf,
+        "profiles": {},
+    }
+
+    test_records = []
+    for profile_name, (row, sel_meta) in selections.items():
+        cfg = grid_row_to_hybrid_config(row, model_class_weights)
+        trow, _, _, _ = evaluate_cached_hybrid(
+            cache_test, gt_test, cfg, "test", model_name=f"Hybrid YOLOv8n + RT-DETR-L ({profile_name})"
+        )
+        rec = {
+            "profile_name": profile_name,
+            "constraints_satisfied": sel_meta["constraints_satisfied"],
+            "selection_rule": sel_meta["rule"],
+            "selection_note": sel_meta.get("note", ""),
+        }
+        for k in ["precision", "recall", "mAP50", "mAP50_95", "f1", "f0_5", "false_positives_per_image"]:
+            if k in row.index:
+                rec[f"val_{k}"] = float(row[k])
+        for k, v in trow.items():
+            if k == "model":
+                rec["test_model"] = v
+            elif k not in rec:
+                rec[f"test_{k}"] = v
+        test_records.append(rec)
+
+        val_keys = [
+            "precision", "recall", "mAP50", "mAP50_95", "f1", "f0_5", "false_positives_per_image",
+            "conf", "fusion_iou", "fusion_mode", "nms_iou", "single_model_conf", "per_class_profile", "model_weight_profile",
+        ]
+        payload["profiles"][profile_name] = {
+            "selection": sel_meta,
+            "validation_metrics": {k: float(row[k]) for k in val_keys if k in row.index},
+            "config": cfg,
+            "test_summary": {k: trow[k] for k in ["precision", "recall", "mAP50", "mAP50_95", "f1", "f0_5", "false_positives_per_image", "tp_iou50", "fp_iou50", "fn_iou50"] if k in trow},
+        }
+
+    pd.DataFrame(test_records).to_csv(HYBRID_SELECTED_PROFILES_TEST_CSV, index=False)
+    HYBRID_SELECTED_PROFILES_CONFIG_JSON.write_text(json.dumps(payload, indent=2, default=str))
+    print("Saved hybrid selected profiles test metrics (v11):", HYBRID_SELECTED_PROFILES_TEST_CSV)
+    print("Saved hybrid selected profiles config (v11):", HYBRID_SELECTED_PROFILES_CONFIG_JSON)
+
+
 def tune_hybrid_config():
     if not RUN_HYBRID_TUNING:
         config = default_hybrid_config()
@@ -1556,6 +1704,8 @@ def tune_hybrid_config():
     HYBRID_SELECTED_CONFIG_JSON.write_text(json.dumps(selected_config, indent=2))
     HYBRID_SELECTED_CONFIG_V2_JSON.write_text(json.dumps(selected_config, indent=2))
     print("Selected hybrid config:", selected_config)
+    if not grid_df.empty:
+        run_hybrid_pareto_v11_profiles(grid_df, model_class_weights)
     return selected_config, grid_df
 
 
@@ -2625,7 +2775,7 @@ traceability = pd.DataFrame([
     ["Provide deployment artifact", "ONNX export plus Jetson/TensorRT deployment status in jetson_deployment_status.json; final TensorRT engine should be built on Jetson Orin"],
     ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8n and RT-DETR-L on val and test splits"],
     ["Implement Hybrid YOLO-Transformer detection", "YOLOv8n proposal detector + RT-DETR-L transformer-style validation/refinement with tuned late-fusion evaluation."],
-    ["Tune hybrid model using validation only", "hybrid_tuning_grid.csv and hybrid_tuning_grid_v2.csv sweep confidence, fusion IoU, fusion mode, single-model fallback confidence, per-class thresholds, class-aware NMS, and class-weighted fusion; hybrid_selected_config.json and hybrid_selected_config_v2.json store the validation-selected F0.5/precision-floor config; hybrid_selected_test_metrics_v2.csv evaluates that config on test"],
+    ["Tune hybrid model using validation only", "hybrid_tuning_grid.csv and hybrid_tuning_grid_v2.csv sweep confidence, fusion IoU, fusion mode, single-model fallback confidence, per-class thresholds, class-aware NMS, and class-weighted fusion; hybrid_selected_config.json and hybrid_selected_config_v2.json store the validation-selected F0.5/precision-floor config; hybrid_selected_test_metrics_v2.csv evaluates that config on test; v11 adds hybrid_pareto_frontier.csv, hybrid_selected_profiles_config.json, and hybrid_selected_profiles_test_metrics.csv (three validation profiles + Pareto frontier, v10 paths unchanged)"],
     ["Analyze hybrid errors", "hybrid_error_analysis.csv, hybrid_error_examples.csv, and hybrid_class_delta.csv summarize false positives, missed defects, and class-level gains/failures"],
     ["Implement custom feature-level CNN-Transformer model", "Trains a custom CNN-Transformer patch refiner on defect/background crops and evaluates refined hybrid predictions in cnn_transformer_refined_hybrid_metrics.csv"],
     ["Provide interpretable visual output", "Ground-truth vs YOLO vs RT-DETR vs tuned hybrid comparison panels saved under hybrid_visual_evidence plus standard prediction gallery"],
