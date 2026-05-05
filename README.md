@@ -58,14 +58,17 @@ After a successful Kaggle run, the important generated files are expected in `/k
 - `architecture_comparison.csv` (YOLOv8n and RT-DETR-L, val and test rows when RT-DETR benchmark runs)
 - `synthetic_augmentation_summary.csv` (generated synthetic defect counts by class)
 - `hybrid_tuning_grid.csv` (validation-only sweep over confidence, fusion IoU, fusion mode, and class-aware NMS)
+- `hybrid_tuning_grid_v2.csv` (stricter validation-only sweep with F0.5, false-positive rate, single-model fallback confidence, per-class thresholds, and class-weighted fusion)
 - `hybrid_selected_config.json` (selected tuned hybrid configuration)
+- `hybrid_selected_config_v2.json` (selected precision-focused hybrid configuration)
 - `hybrid_selected_test_metrics.csv` (test metrics for the selected validation-tuned hybrid)
+- `hybrid_selected_test_metrics_v2.csv` (test metrics for the selected precision-focused hybrid)
 - `hybrid_selected_per_class_metrics.csv` (per-class test metrics for the selected validation-tuned hybrid)
 - `hybrid_fusion_metrics.csv` (Hybrid YOLOv8n + RT-DETR-L late-fusion val/test metrics)
 - `hybrid_per_class_metrics.csv` (hybrid per-class precision/recall/mAP)
 - `hybrid_robustness_metrics.csv` (selected hybrid robustness under clean, lighting, noise, blur, and rotation conditions)
 - `hybrid_robustness_per_class_metrics.csv` (hybrid robustness broken down by class)
-- `hybrid_error_analysis.csv`, `hybrid_error_examples.csv`, and `hybrid_class_delta.csv`
+- `hybrid_error_analysis.csv`, `hybrid_error_analysis_v2.csv`, `hybrid_error_examples.csv`, and `hybrid_class_delta.csv`
 - `cnn_transformer_refiner_training.csv` (custom CNN-Transformer feature refiner training history)
 - `cnn_transformer_refined_hybrid_metrics.csv` (refined hybrid val/test metrics)
 - `cnn_transformer_refined_hybrid_per_class.csv` (refined hybrid per-class metrics)
@@ -83,9 +86,11 @@ After a successful Kaggle run, the important generated files are expected in `/k
 
 - The implemented system uses `YOLOv8n` as a CNN real-time baseline and `RT-DETR-L` as a transformer-style benchmark to evaluate CNN-vs-transformer tradeoffs.
 - The notebook also includes a tuned **Hybrid YOLO-Transformer late-fusion pipeline** (decision-level fusion), combining YOLO and RT-DETR predictions class-wise with validation-selected confidence, IoU, fusion mode, and class-aware NMS settings.
-- The next run adds synthetic copy-paste defect augmentation and a custom CNN-Transformer patch refiner to strengthen the survey-paper claims around augmentation and feature-level CNN-Transformer modeling.
+- The latest tuning path adds a stricter precision-focused hybrid sweep using F0.5, false positives per image, single-model high-confidence fallback, per-class confidence thresholds, and class-weighted YOLO/RT-DETR fusion.
+- Synthetic copy-paste defect augmentation and the custom CNN-Transformer patch refiner are implemented to support the survey-paper discussion around augmentation and feature-level CNN-Transformer modeling. The refiner is treated as an experimental extension unless its metrics beat the tuned late-fusion hybrid.
 - TensorRT export is documented as a Jetson-target deployment step because TensorRT engines are hardware/runtime specific; ONNX export is completed in Kaggle.
-- In the latest completed benchmark run, RT-DETR-L improved test mAP50 from 0.853 to 0.879 and mAP50-95 from 0.442 to 0.488, while remaining under the 100 ms mean latency target.
+- In the latest completed benchmark run, the tuned late-fusion hybrid reached test precision 0.625, recall 0.928, mAP50 0.883, and mAP50-95 0.480. The new precision-focused sweep is intended to reduce false positives while preserving as much hybrid recall/mAP as possible.
+- RT-DETR-L remains the stronger high-precision reference model, so final reporting should compare tuned hybrid recall/mAP gains against RT-DETR precision and latency.
 - Gaussian noise remains the weakest robustness condition and is currently treated as a known limitation for future training-time augmentation improvements.
 
 ## Security Note
