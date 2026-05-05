@@ -1,6 +1,6 @@
 # Pre-Hybrid Architecture Comparison Report
 
-> Note: This document captures the **pre-hybrid** baseline comparison. The active notebook now includes a **Hybrid YOLO-Transformer late-fusion pipeline** with dedicated outputs (`hybrid_fusion_metrics.csv`, `hybrid_per_class_metrics.csv`) for the next-phase evaluation.
+> Note: This document captures the **pre-hybrid** baseline comparison. The active notebook now includes a validation-tuned **Hybrid YOLO-Transformer late-fusion pipeline** plus synthetic defect augmentation, hybrid robustness/error analysis, visual evidence, and a custom CNN-Transformer feature refiner for next-phase evaluation.
 
 This section compares the two detector architectures evaluated before adding the hybrid fusion stage. The purpose of this comparison is to establish a clear baseline between a real-time CNN-based detector and a transformer-style detector on the same PCB defect dataset, train/validation/test split, and six-class taxonomy.
 
@@ -155,4 +155,5 @@ Use the following order in the final report:
 6. Accuracy-latency tradeoff discussion.
 7. Motivation for hybrid YOLO-Transformer model based on the comparison.
 8. Hybrid model implementation and results.
-
+9. Tuned hybrid results: selected config, test metrics, robustness, visual examples, and error analysis.
+10. Synthetic augmentation and custom CNN-Transformer refiner results, if the extended notebook run improves the hybrid precision/accuracy tradeoff.

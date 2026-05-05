@@ -25,7 +25,7 @@ cells = [
         """
 # Automated PCB Defect Detection with Deep Learning
 
-This notebook is configured for Kaggle GPU. It prepares the PCB dataset, converts annotations to YOLO labels, trains a YOLOv8 detector, runs Albumentations-based robustness tests, benchmarks a transformer-style RT-DETR detector, measures inference latency, and exports deployment artifacts.
+This notebook is configured for Kaggle GPU. It prepares the PCB dataset, converts annotations to YOLO labels, applies synthetic defect augmentation, trains a YOLOv8 detector, runs Albumentations-based robustness tests, benchmarks a transformer-style RT-DETR detector, evaluates YOLO-Transformer hybrid fusion, trains a custom CNN-Transformer feature refiner, measures inference latency, and exports deployment artifacts.
 """
     ),
     code_cell(
@@ -68,6 +68,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 from IPython.display import HTML, display
 from ultralytics import YOLO
 
@@ -88,10 +90,33 @@ ROBUSTNESS_SAMPLE_SIZE = 250
 RUN_TENSORRT_EXPORT = False
 USE_DSPCBSD_PLUS = True
 MAX_DSPCBSD_PLUS_IMAGES = None
+RUN_SYNTHETIC_DEFECT_AUGMENTATION = True
+SYNTHETIC_TARGETS_PER_CLASS = {
+    "Missing_hole": 320,
+    "Mouse_bite": 240,
+    "Spur": 240,
+}
+SYNTHETIC_PATCH_CONTEXT_RANGE = (1.4, 2.4)
 RUN_HYBRID_FUSION = True
 HYBRID_CONF = 0.01
 HYBRID_FUSION_IOU = 0.55
 HYBRID_EVAL_SAMPLE_SIZE = None
+RUN_HYBRID_TUNING = True
+HYBRID_TUNING_CONF_VALUES = [0.05, 0.10, 0.20, 0.30]
+HYBRID_TUNING_IOU_VALUES = [0.45, 0.55, 0.65]
+HYBRID_TUNING_MODES = ["agreement_only", "weighted_fusion", "union_high_conf"]
+HYBRID_TUNING_NMS_VALUES = [0.45, 0.60]
+HYBRID_MIN_PRECISION_FOR_SELECTION = 0.50
+HYBRID_TUNING_SAMPLE_SIZE = 350
+HYBRID_VISUAL_SAMPLE_SIZE = 12
+RUN_CNN_TRANSFORMER_REFINER = True
+REFINER_EPOCHS = 5
+REFINER_BATCH = 64
+REFINER_PATCH_SIZE = 96
+REFINER_MAX_POSITIVE_PER_CLASS = 650
+REFINER_NEGATIVE_SAMPLES = 1600
+REFINER_KEEP_PROB = 0.45
+REFINER_CANDIDATE_CONF = 0.03
 
 DSPCBSD_PLUS_URL = "https://ndownloader.figshare.com/files/44069552"
 DSPCBSD_PLUS_MD5 = "508334b65bdaea7336f4c1b5d5a80a81"
@@ -143,6 +168,21 @@ LATENCY_TABLE_CSV = WORK_DIR / "latency_comparison.csv"
 FINAL_SUMMARY_CSV = WORK_DIR / "final_results_summary.csv"
 HYBRID_FUSION_CSV = WORK_DIR / "hybrid_fusion_metrics.csv"
 HYBRID_PER_CLASS_CSV = WORK_DIR / "hybrid_per_class_metrics.csv"
+HYBRID_TUNING_GRID_CSV = WORK_DIR / "hybrid_tuning_grid.csv"
+HYBRID_SELECTED_CONFIG_JSON = WORK_DIR / "hybrid_selected_config.json"
+HYBRID_SELECTED_TEST_CSV = WORK_DIR / "hybrid_selected_test_metrics.csv"
+HYBRID_SELECTED_PER_CLASS_CSV = WORK_DIR / "hybrid_selected_per_class_metrics.csv"
+HYBRID_ROBUSTNESS_CSV = WORK_DIR / "hybrid_robustness_metrics.csv"
+HYBRID_ROBUSTNESS_PER_CLASS_CSV = WORK_DIR / "hybrid_robustness_per_class_metrics.csv"
+HYBRID_ERROR_ANALYSIS_CSV = WORK_DIR / "hybrid_error_analysis.csv"
+HYBRID_ERROR_EXAMPLES_CSV = WORK_DIR / "hybrid_error_examples.csv"
+HYBRID_CLASS_DELTA_CSV = WORK_DIR / "hybrid_class_delta.csv"
+HYBRID_VIS_DIR = WORK_DIR / "hybrid_visual_evidence"
+SYNTHETIC_AUGMENTATION_CSV = WORK_DIR / "synthetic_augmentation_summary.csv"
+REFINER_TRAINING_CSV = WORK_DIR / "cnn_transformer_refiner_training.csv"
+REFINER_METRICS_CSV = WORK_DIR / "cnn_transformer_refined_hybrid_metrics.csv"
+REFINER_PER_CLASS_CSV = WORK_DIR / "cnn_transformer_refined_hybrid_per_class.csv"
+JETSON_DEPLOYMENT_STATUS_JSON = WORK_DIR / "jetson_deployment_status.json"
 
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
@@ -437,6 +477,185 @@ def write_split(records, split):
 write_split(train_records, "train")
 write_split(val_records, "val")
 write_split(test_records, "test")
+
+def read_train_yolo_file(label_path: Path):
+    rows = []
+    if not label_path.exists():
+        return rows
+    for line in label_path.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) != 5:
+            continue
+        cls_id = int(float(parts[0]))
+        x, y, w, h = map(float, parts[1:])
+        if 0 <= cls_id < len(CLASSES) and w > 0 and h > 0:
+            rows.append((cls_id, x, y, w, h))
+    return rows
+
+
+def yolo_norm_to_xyxy_pixels(box, width, height):
+    _, x, y, w, h = box
+    x1 = int(max(0, (x - w / 2.0) * width))
+    y1 = int(max(0, (y - h / 2.0) * height))
+    x2 = int(min(width - 1, (x + w / 2.0) * width))
+    y2 = int(min(height - 1, (y + h / 2.0) * height))
+    return x1, y1, x2, y2
+
+
+def xyxy_pixels_to_yolo_norm(cls_id, xyxy, width, height):
+    x1, y1, x2, y2 = xyxy
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+    xc = (x1 + bw / 2.0) / width
+    yc = (y1 + bh / 2.0) / height
+    return cls_id, xc, yc, bw / width, bh / height
+
+
+def crop_defect_patch(image, label_row, context_scale):
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = yolo_norm_to_xyxy_pixels(label_row, width, height)
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    crop_w = max(bw + 4, int(bw * context_scale))
+    crop_h = max(bh + 4, int(bh * context_scale))
+    px1 = int(max(0, cx - crop_w / 2.0))
+    py1 = int(max(0, cy - crop_h / 2.0))
+    px2 = int(min(width, cx + crop_w / 2.0))
+    py2 = int(min(height, cy + crop_h / 2.0))
+    if px2 <= px1 or py2 <= py1:
+        return None, None
+    patch = image[py1:py2, px1:px2].copy()
+    defect_xyxy_in_patch = [x1 - px1, y1 - py1, x2 - px1, y2 - py1]
+    return patch, defect_xyxy_in_patch
+
+
+def feathered_paste(background, patch, top_left):
+    x, y = top_left
+    h, w = patch.shape[:2]
+    roi = background[y:y + h, x:x + w]
+    if roi.shape[:2] != patch.shape[:2]:
+        return background
+
+    mask = np.full((h, w), 255, dtype=np.uint8)
+    blur = max(3, (min(h, w) // 8) | 1)
+    mask = cv2.GaussianBlur(mask, (blur, blur), 0).astype(np.float32) / 255.0
+    mask = mask[..., None]
+    blended = (patch.astype(np.float32) * mask + roi.astype(np.float32) * (1.0 - mask)).astype(np.uint8)
+    background[y:y + h, x:x + w] = blended
+    return background
+
+
+def build_synthetic_augmentation_pool():
+    train_img_dir = YOLO_ROOT / "train/images"
+    train_lbl_dir = YOLO_ROOT / "train/labels"
+    pool = {i: [] for i in range(len(CLASSES))}
+    image_paths = sorted(train_img_dir.glob("*.*"))
+    for image_path in image_paths:
+        label_rows = read_train_yolo_file(train_lbl_dir / f"{image_path.stem}.txt")
+        for row in label_rows:
+            pool[row[0]].append((image_path, row))
+    return pool, image_paths
+
+
+def make_synthetic_defect_images():
+    if not RUN_SYNTHETIC_DEFECT_AUGMENTATION:
+        print("Synthetic defect augmentation disabled.")
+        return pd.DataFrame()
+
+    rng = random.Random(SEED)
+    pool, background_paths = build_synthetic_augmentation_pool()
+    train_img_dir = YOLO_ROOT / "train/images"
+    train_lbl_dir = YOLO_ROOT / "train/labels"
+    summary_rows = []
+
+    try:
+        synthetic_noise = A.GaussNoise(std_range=(0.01, 0.04), mean_range=(0.0, 0.0), p=0.35)
+    except TypeError:
+        synthetic_noise = A.GaussNoise(var_limit=(2.0, 12.0), p=0.35)
+
+    transform = A.Compose([
+        A.RandomBrightnessContrast(brightness_limit=0.25, contrast_limit=0.25, p=0.8),
+        A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=20, val_shift_limit=15, p=0.4),
+        synthetic_noise,
+        A.MotionBlur(blur_limit=3, p=0.2),
+    ])
+
+    for class_name, target_count in SYNTHETIC_TARGETS_PER_CLASS.items():
+        cls_id = CLASS_TO_ID[class_name.lower()]
+        generated = 0
+        attempts = 0
+        if not pool.get(cls_id):
+            summary_rows.append({"class_name": class_name, "requested": target_count, "generated": 0, "note": "no source defects"})
+            continue
+
+        while generated < target_count and attempts < target_count * 20:
+            attempts += 1
+            source_image_path, source_label = rng.choice(pool[cls_id])
+            background_path = rng.choice(background_paths)
+            source = cv2.imread(str(source_image_path))
+            background = cv2.imread(str(background_path))
+            if source is None or background is None:
+                continue
+
+            context = rng.uniform(*SYNTHETIC_PATCH_CONTEXT_RANGE)
+            patch, patch_box = crop_defect_patch(source, source_label, context)
+            if patch is None or min(patch.shape[:2]) < 6:
+                continue
+
+            patch = transform(image=patch)["image"]
+            orig_patch_h, orig_patch_w = patch.shape[:2]
+            scale = rng.uniform(0.75, 1.35)
+            new_w = max(4, int(patch.shape[1] * scale))
+            new_h = max(4, int(patch.shape[0] * scale))
+            if new_w >= background.shape[1] or new_h >= background.shape[0]:
+                continue
+            patch = cv2.resize(patch, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+            x = rng.randint(0, background.shape[1] - new_w)
+            y = rng.randint(0, background.shape[0] - new_h)
+            background = feathered_paste(background, patch, (x, y))
+
+            # Use the source defect's relative location inside its crop after resizing.
+            rel_x1 = max(0.0, min(1.0, patch_box[0] / max(1, orig_patch_w)))
+            rel_y1 = max(0.0, min(1.0, patch_box[1] / max(1, orig_patch_h)))
+            rel_x2 = max(0.0, min(1.0, patch_box[2] / max(1, orig_patch_w)))
+            rel_y2 = max(0.0, min(1.0, patch_box[3] / max(1, orig_patch_h)))
+            defect_xyxy = [
+                x + rel_x1 * new_w,
+                y + rel_y1 * new_h,
+                x + rel_x2 * new_w,
+                y + rel_y2 * new_h,
+            ]
+            if defect_xyxy[2] <= defect_xyxy[0] + 1 or defect_xyxy[3] <= defect_xyxy[1] + 1:
+                continue
+
+            base_labels = read_train_yolo_file(train_lbl_dir / f"{background_path.stem}.txt")
+            synthetic_label = xyxy_pixels_to_yolo_norm(cls_id, defect_xyxy, background.shape[1], background.shape[0])
+            output_stem = f"synthetic_{class_name}_{generated:04d}_{Path(background_path).stem}"
+            cv2.imwrite(str(train_img_dir / f"{output_stem}.jpg"), background)
+            labels = base_labels + [synthetic_label]
+            label_lines = [f"{int(c)} {x:.6f} {y:.6f} {w:.6f} {h:.6f}" for c, x, y, w, h in labels]
+            (train_lbl_dir / f"{output_stem}.txt").write_text("\\n".join(label_lines) + "\\n")
+            generated += 1
+
+        summary_rows.append({
+            "class_name": class_name,
+            "requested": target_count,
+            "generated": generated,
+            "source_instances": len(pool.get(cls_id, [])),
+            "note": "copy-paste synthetic augmentation; TransGAN-style class-balancing surrogate",
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(SYNTHETIC_AUGMENTATION_CSV, index=False)
+    display(summary_df)
+    print("Saved synthetic augmentation summary:", SYNTHETIC_AUGMENTATION_CSV)
+    return summary_df
+
+
+synthetic_augmentation_df = make_synthetic_defect_images()
 
 names_block = "\\n".join(f"  {i}: {name}" for i, name in enumerate(CLASSES))
 DATA_YAML.write_text(
@@ -855,7 +1074,37 @@ def predict_xyxy(det_model, image_path: Path, imgsz, conf_thr):
     return out
 
 
-def fuse_class_boxes(yolo_boxes, rtdetr_boxes, iou_thr):
+def default_hybrid_config():
+    return {
+        "conf": HYBRID_CONF,
+        "fusion_iou": HYBRID_FUSION_IOU,
+        "mode": "weighted_fusion",
+        "nms_iou": 0.60,
+    }
+
+
+def weighted_box_merge(y, r):
+    wy = max(float(y["conf"]), 1e-6)
+    wr = max(float(r["conf"]), 1e-6)
+    denom = wy + wr
+    fused_xyxy = [
+        (wy * y["xyxy"][0] + wr * r["xyxy"][0]) / denom,
+        (wy * y["xyxy"][1] + wr * r["xyxy"][1]) / denom,
+        (wy * y["xyxy"][2] + wr * r["xyxy"][2]) / denom,
+        (wy * y["xyxy"][3] + wr * r["xyxy"][3]) / denom,
+    ]
+    fused_conf = min(1.0, max(float(y["conf"]), float(r["conf"])) + 0.05)
+    return {"cls": int(y["cls"]), "conf": float(fused_conf), "xyxy": fused_xyxy, "sources": "yolo+rtdetr"}
+
+
+def fuse_class_boxes_config(yolo_boxes, rtdetr_boxes, config):
+    conf_thr = float(config.get("conf", HYBRID_CONF))
+    iou_thr = float(config.get("fusion_iou", HYBRID_FUSION_IOU))
+    mode = config.get("mode", "weighted_fusion")
+
+    yolo_boxes = [b for b in yolo_boxes if float(b["conf"]) >= conf_thr]
+    rtdetr_boxes = [b for b in rtdetr_boxes if float(b["conf"]) >= conf_thr]
+
     fused = []
     used_r = set()
     for y in sorted(yolo_boxes, key=lambda x: x["conf"], reverse=True):
@@ -871,34 +1120,38 @@ def fuse_class_boxes(yolo_boxes, rtdetr_boxes, iou_thr):
         if best_idx >= 0 and best_iou >= iou_thr:
             r = rtdetr_boxes[best_idx]
             used_r.add(best_idx)
-            wy = max(y["conf"], 1e-6)
-            wr = max(r["conf"], 1e-6)
-            denom = wy + wr
-            fused_xyxy = [
-                (wy * y["xyxy"][0] + wr * r["xyxy"][0]) / denom,
-                (wy * y["xyxy"][1] + wr * r["xyxy"][1]) / denom,
-                (wy * y["xyxy"][2] + wr * r["xyxy"][2]) / denom,
-                (wy * y["xyxy"][3] + wr * r["xyxy"][3]) / denom,
-            ]
-            fused_conf = min(1.0, max(y["conf"], r["conf"]) + 0.05)
-            fused.append({"cls": y["cls"], "conf": float(fused_conf), "xyxy": fused_xyxy})
-        elif y["conf"] >= HYBRID_CONF:
-            fused.append(y)
+            fused.append(weighted_box_merge(y, r))
+        elif mode in {"weighted_fusion", "union_high_conf"}:
+            keep_thr = conf_thr if mode == "weighted_fusion" else max(conf_thr, 0.25)
+            if float(y["conf"]) >= keep_thr:
+                out = dict(y)
+                out["sources"] = "yolo"
+                fused.append(out)
 
-    for idx, r in enumerate(rtdetr_boxes):
-        if idx not in used_r and r["conf"] >= HYBRID_CONF:
-            fused.append(r)
+    if mode in {"weighted_fusion", "union_high_conf"}:
+        keep_thr = conf_thr if mode == "weighted_fusion" else max(conf_thr, 0.25)
+        for idx, r in enumerate(rtdetr_boxes):
+            if idx not in used_r and float(r["conf"]) >= keep_thr:
+                out = dict(r)
+                out["sources"] = "rtdetr"
+                fused.append(out)
     return fused
 
 
-def hybrid_fuse_predictions(yolo_preds, rtdetr_preds, iou_thr=0.55):
+def hybrid_fuse_predictions_config(yolo_preds, rtdetr_preds, config):
     out = []
     classes = sorted(set([b["cls"] for b in yolo_preds] + [b["cls"] for b in rtdetr_preds]))
     for cls_id in classes:
         y_cls = [b for b in yolo_preds if b["cls"] == cls_id]
         r_cls = [b for b in rtdetr_preds if b["cls"] == cls_id]
-        out.extend(fuse_class_boxes(y_cls, r_cls, iou_thr=iou_thr))
-    return nms_class_aware(out, iou_thr=0.6)
+        out.extend(fuse_class_boxes_config(y_cls, r_cls, config))
+    return nms_class_aware(out, iou_thr=float(config.get("nms_iou", 0.60)))
+
+
+def hybrid_fuse_predictions(yolo_preds, rtdetr_preds, iou_thr=0.55):
+    config = default_hybrid_config()
+    config["fusion_iou"] = iou_thr
+    return hybrid_fuse_predictions_config(yolo_preds, rtdetr_preds, config)
 
 
 def ap_from_pr(recalls, precisions):
@@ -972,15 +1225,7 @@ def evaluate_predictions(gt_by_class, pred_by_class, iou_thresholds=None):
     return per_class_rows
 
 
-def build_gt_for_split(split_name):
-    img_dir = VAL_IMG_DIR if split_name == "val" else TEST_IMG_DIR
-    lbl_dir = VAL_LBL_DIR if split_name == "val" else TEST_LBL_DIR
-    image_paths = sorted(img_dir.glob("*.*"))
-    if HYBRID_EVAL_SAMPLE_SIZE is not None:
-        rng = random.Random(SEED)
-        rng.shuffle(image_paths)
-        image_paths = image_paths[: min(HYBRID_EVAL_SAMPLE_SIZE, len(image_paths))]
-
+def build_gt_for_image_paths(image_paths, lbl_dir):
     gt_by_class = {i: {} for i in range(len(CLASSES))}
     for image_path in image_paths:
         image = cv2.imread(str(image_path))
@@ -1003,76 +1248,433 @@ def build_gt_for_split(split_name):
             x2 = min(float(w), (xc + bw / 2.0) * w)
             y2 = min(float(h), (yc + bh / 2.0) * h)
             gt_by_class.setdefault(int(cls_id), {}).setdefault(image_path.name, []).append([x1, y1, x2, y2])
+    return gt_by_class
+
+
+def build_gt_for_split(split_name, sample_size=None):
+    img_dir = VAL_IMG_DIR if split_name == "val" else TEST_IMG_DIR
+    lbl_dir = VAL_LBL_DIR if split_name == "val" else TEST_LBL_DIR
+    image_paths = sorted(img_dir.glob("*.*"))
+    limit = sample_size if sample_size is not None else HYBRID_EVAL_SAMPLE_SIZE
+    if limit is not None:
+        rng = random.Random(SEED)
+        rng.shuffle(image_paths)
+        image_paths = image_paths[: min(limit, len(image_paths))]
+
+    gt_by_class = build_gt_for_image_paths(image_paths, lbl_dir)
     return image_paths, gt_by_class
+
+
+def collect_hybrid_prediction_cache(image_paths, conf_thr):
+    cache = []
+    for image_path in image_paths:
+        cache.append({
+            "image_path": image_path,
+            "yolo": predict_xyxy(model, image_path, IMG_SIZE, conf_thr),
+            "rtdetr": predict_xyxy(rtdetr_model, image_path, RTDETR_IMG_SIZE, conf_thr),
+        })
+    return cache
+
+
+def predictions_from_cache(cache, config):
+    pred_by_class = {i: [] for i in range(len(CLASSES))}
+    preds_by_image = {}
+    for item in cache:
+        image_path = item["image_path"]
+        fused = hybrid_fuse_predictions_config(item["yolo"], item["rtdetr"], config)
+        preds_by_image[image_path.name] = fused
+        for pred in fused:
+            pred_by_class[int(pred["cls"])].append({
+                "image_id": image_path.name,
+                "conf": float(pred["conf"]),
+                "xyxy": pred["xyxy"],
+            })
+    return pred_by_class, preds_by_image
+
+
+def summarize_per_class_rows(per_cls):
+    precision = float(np.mean([r["precision"] for r in per_cls])) if per_cls else 0.0
+    recall = float(np.mean([r["recall"] for r in per_cls])) if per_cls else 0.0
+    mAP50 = float(np.mean([r["mAP50"] for r in per_cls])) if per_cls else 0.0
+    mAP50_95 = float(np.mean([r["mAP50_95"] for r in per_cls])) if per_cls else 0.0
+    f1 = float(2 * precision * recall / max(precision + recall, 1e-9))
+    return precision, recall, mAP50, mAP50_95, f1
+
+
+def evaluate_cached_hybrid(cache, gt_by_class, config, split_name, model_name="Hybrid YOLOv8n + RT-DETR-L"):
+    pred_by_class, preds_by_image = predictions_from_cache(cache, config)
+    per_cls = evaluate_predictions(gt_by_class, pred_by_class)
+    precision, recall, mAP50, mAP50_95, f1 = summarize_per_class_rows(per_cls)
+    row = {
+        "model": model_name,
+        "family": "YOLO-Transformer tuned late fusion",
+        "split": split_name,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "mAP50": mAP50,
+        "mAP50_95": mAP50_95,
+        "images": len(cache),
+        "conf": float(config.get("conf", HYBRID_CONF)),
+        "fusion_iou": float(config.get("fusion_iou", HYBRID_FUSION_IOU)),
+        "fusion_mode": config.get("mode", "weighted_fusion"),
+        "nms_iou": float(config.get("nms_iou", 0.60)),
+    }
+    return row, per_cls, pred_by_class, preds_by_image
+
+
+def tune_hybrid_config():
+    if not RUN_HYBRID_TUNING:
+        config = default_hybrid_config()
+        HYBRID_SELECTED_CONFIG_JSON.write_text(json.dumps(config, indent=2))
+        return config, pd.DataFrame()
+
+    val_paths, gt_by_class = build_gt_for_split("val", sample_size=HYBRID_TUNING_SAMPLE_SIZE)
+    min_conf = min(HYBRID_TUNING_CONF_VALUES)
+    cache = collect_hybrid_prediction_cache(val_paths, min_conf)
+    rows = []
+    for conf in HYBRID_TUNING_CONF_VALUES:
+        for fusion_iou in HYBRID_TUNING_IOU_VALUES:
+            for mode in HYBRID_TUNING_MODES:
+                for nms_iou in HYBRID_TUNING_NMS_VALUES:
+                    config = {
+                        "conf": float(conf),
+                        "fusion_iou": float(fusion_iou),
+                        "mode": mode,
+                        "nms_iou": float(nms_iou),
+                    }
+                    row, _, _, _ = evaluate_cached_hybrid(cache, gt_by_class, config, "val_tuning")
+                    rows.append(row)
+                    print("HYBRID_TUNE", row)
+
+    grid_df = pd.DataFrame(rows)
+    grid_df.to_csv(HYBRID_TUNING_GRID_CSV, index=False)
+    display(grid_df.sort_values(["precision", "mAP50_95"], ascending=False).head(12))
+    print("Saved hybrid tuning grid:", HYBRID_TUNING_GRID_CSV)
+
+    eligible = grid_df[grid_df["precision"] >= HYBRID_MIN_PRECISION_FOR_SELECTION]
+    sort_cols = ["mAP50_95", "f1", "precision"]
+    if eligible.empty:
+        selected = grid_df.sort_values(["f1", "mAP50_95", "precision"], ascending=False).iloc[0]
+    else:
+        selected = eligible.sort_values(sort_cols, ascending=False).iloc[0]
+
+    selected_config = {
+        "conf": float(selected["conf"]),
+        "fusion_iou": float(selected["fusion_iou"]),
+        "mode": str(selected["fusion_mode"]),
+        "nms_iou": float(selected["nms_iou"]),
+        "selection_split": "val",
+        "selection_metric": "mAP50_95_with_precision_floor" if not eligible.empty else "f1_fallback_no_precision_floor_match",
+        "precision_floor": HYBRID_MIN_PRECISION_FOR_SELECTION,
+    }
+    HYBRID_SELECTED_CONFIG_JSON.write_text(json.dumps(selected_config, indent=2))
+    print("Selected hybrid config:", selected_config)
+    return selected_config, grid_df
+
+
+def run_selected_hybrid_eval(selected_config):
+    rows = []
+    per_class_rows = []
+    selected_test_row = None
+    selected_test_per_cls = []
+    selected_test_pred_by_class = {}
+    selected_test_preds_by_image = {}
+    selected_test_gt_by_class = {}
+
+    for split_name in ["val", "test"]:
+        image_paths, gt_by_class = build_gt_for_split(split_name)
+        cache = collect_hybrid_prediction_cache(image_paths, float(selected_config["conf"]))
+        row, per_cls, pred_by_class, preds_by_image = evaluate_cached_hybrid(cache, gt_by_class, selected_config, split_name)
+        rows.append(row)
+        for cls_row in per_cls:
+            per_class_rows.append({
+                "model": "Hybrid YOLOv8n + RT-DETR-L",
+                "family": "YOLO-Transformer tuned late fusion",
+                "split": split_name,
+                **cls_row,
+                "conf": selected_config["conf"],
+                "fusion_iou": selected_config["fusion_iou"],
+                "fusion_mode": selected_config["mode"],
+                "nms_iou": selected_config["nms_iou"],
+            })
+        if split_name == "test":
+            selected_test_row = row
+            selected_test_per_cls = per_cls
+            selected_test_pred_by_class = pred_by_class
+            selected_test_preds_by_image = preds_by_image
+            selected_test_gt_by_class = gt_by_class
+        print("HYBRID_SELECTED", split_name.upper(), row)
+
+    fusion_df = pd.DataFrame(rows)
+    fusion_per_class_df = pd.DataFrame(per_class_rows)
+    fusion_df.to_csv(HYBRID_FUSION_CSV, index=False)
+    fusion_per_class_df.to_csv(HYBRID_PER_CLASS_CSV, index=False)
+    pd.DataFrame([selected_test_row]).to_csv(HYBRID_SELECTED_TEST_CSV, index=False)
+    pd.DataFrame([
+        {
+            "model": "Hybrid YOLOv8n + RT-DETR-L",
+            "family": "YOLO-Transformer tuned late fusion",
+            "split": "test",
+            **row,
+            "conf": selected_config["conf"],
+            "fusion_iou": selected_config["fusion_iou"],
+            "fusion_mode": selected_config["mode"],
+            "nms_iou": selected_config["nms_iou"],
+        }
+        for row in selected_test_per_cls
+    ]).to_csv(HYBRID_SELECTED_PER_CLASS_CSV, index=False)
+    print("Saved hybrid fusion metrics:", HYBRID_FUSION_CSV)
+    print("Saved selected hybrid test metrics:", HYBRID_SELECTED_TEST_CSV)
+    print("Saved selected hybrid per-class metrics:", HYBRID_SELECTED_PER_CLASS_CSV)
+    display(fusion_df)
+    display(fusion_per_class_df)
+
+    architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
+    architecture_rows = fusion_df.drop(columns=["images", "conf", "fusion_iou", "fusion_mode", "nms_iou"], errors="ignore")
+    architecture_df = pd.concat([architecture_df, architecture_rows], ignore_index=True)
+    architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
+    print("Saved architecture comparison:", ARCHITECTURE_CSV)
+
+    return (
+        fusion_df,
+        fusion_per_class_df,
+        selected_test_pred_by_class,
+        selected_test_preds_by_image,
+        selected_test_gt_by_class,
+    )
+
+
+def run_hybrid_robustness_eval(selected_config):
+    rows = []
+    per_class_rows = []
+    if not RUN_ROBUSTNESS_TESTS:
+        return pd.DataFrame(), pd.DataFrame()
+
+    for condition_name in make_robustness_transforms().keys():
+        condition_root = ROBUSTNESS_ROOT / condition_name
+        image_dir = condition_root / "test/images"
+        label_dir = condition_root / "test/labels"
+        if not image_dir.exists() or not label_dir.exists():
+            continue
+        image_paths = sorted(image_dir.glob("*.*"))
+        gt_by_class = build_gt_for_image_paths(image_paths, label_dir)
+        cache = collect_hybrid_prediction_cache(image_paths, float(selected_config["conf"]))
+        row, per_cls, _, _ = evaluate_cached_hybrid(cache, gt_by_class, selected_config, condition_name)
+        row.update({"condition": condition_name, "images": len(image_paths)})
+        rows.append(row)
+        for cls_row in per_cls:
+            per_class_rows.append({
+                "model": "Hybrid YOLOv8n + RT-DETR-L",
+                "family": "YOLO-Transformer tuned late fusion",
+                "condition": condition_name,
+                **cls_row,
+            })
+        print("HYBRID_ROBUSTNESS", row)
+
+    robustness_df = pd.DataFrame(rows)
+    robustness_per_class_df = pd.DataFrame(per_class_rows)
+    robustness_df.to_csv(HYBRID_ROBUSTNESS_CSV, index=False)
+    robustness_per_class_df.to_csv(HYBRID_ROBUSTNESS_PER_CLASS_CSV, index=False)
+    print("Saved hybrid robustness metrics:", HYBRID_ROBUSTNESS_CSV)
+    print("Saved hybrid robustness per-class metrics:", HYBRID_ROBUSTNESS_PER_CLASS_CSV)
+    display(robustness_df)
+    return robustness_df, robustness_per_class_df
+
+
+def cv_color_for_class(cls_id):
+    palette = [
+        (43, 130, 255),
+        (60, 180, 75),
+        (255, 225, 25),
+        (245, 130, 48),
+        (145, 30, 180),
+        (70, 240, 240),
+    ]
+    return palette[int(cls_id) % len(palette)]
+
+
+def draw_xyxy_boxes(image, boxes, label_prefix="", is_gt=False):
+    out = image.copy()
+    for box in boxes:
+        cls_id = int(box.get("cls", box.get("class_id", 0)))
+        x1, y1, x2, y2 = [int(round(v)) for v in box["xyxy"]]
+        color = (0, 255, 0) if is_gt else cv_color_for_class(cls_id)
+        caption = f"{label_prefix}{CLASSES[cls_id]}"
+        if "conf" in box:
+            caption += f" {box['conf']:.2f}"
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(out, caption, (x1, max(18, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+    return out
+
+
+def gt_boxes_for_image(gt_by_class, image_name):
+    boxes = []
+    for cls_id, per_image in gt_by_class.items():
+        for xyxy in per_image.get(image_name, []):
+            boxes.append({"cls": int(cls_id), "xyxy": xyxy})
+    return boxes
+
+
+def label_panel(image, title):
+    panel = image.copy()
+    cv2.rectangle(panel, (0, 0), (panel.shape[1], 28), (0, 0, 0), -1)
+    cv2.putText(panel, title, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    return panel
+
+
+def save_hybrid_visual_evidence(selected_config, split_name="test"):
+    image_paths, gt_by_class = build_gt_for_split(split_name)
+    rng = random.Random(SEED)
+    rng.shuffle(image_paths)
+    image_paths = image_paths[: min(HYBRID_VISUAL_SAMPLE_SIZE, len(image_paths))]
+    if HYBRID_VIS_DIR.exists():
+        shutil.rmtree(HYBRID_VIS_DIR)
+    HYBRID_VIS_DIR.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for image_path in image_paths:
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        yolo_preds = predict_xyxy(model, image_path, IMG_SIZE, float(selected_config["conf"]))
+        rtdetr_preds = predict_xyxy(rtdetr_model, image_path, RTDETR_IMG_SIZE, float(selected_config["conf"]))
+        hybrid_preds = hybrid_fuse_predictions_config(yolo_preds, rtdetr_preds, selected_config)
+        gt_boxes = gt_boxes_for_image(gt_by_class, image_path.name)
+
+        panels = [
+            label_panel(draw_xyxy_boxes(image, gt_boxes, "GT:", is_gt=True), "Ground Truth"),
+            label_panel(draw_xyxy_boxes(image, yolo_preds, "YOLO:"), "YOLOv8n"),
+            label_panel(draw_xyxy_boxes(image, rtdetr_preds, "RT-DETR:"), "RT-DETR-L"),
+            label_panel(draw_xyxy_boxes(image, hybrid_preds, "HYB:"), "Tuned Hybrid"),
+        ]
+        resized = [cv2.resize(p, (480, 360), interpolation=cv2.INTER_AREA) for p in panels]
+        top = np.concatenate(resized[:2], axis=1)
+        bottom = np.concatenate(resized[2:], axis=1)
+        canvas = np.concatenate([top, bottom], axis=0)
+        out_path = HYBRID_VIS_DIR / f"{image_path.stem}_hybrid_comparison.jpg"
+        cv2.imwrite(str(out_path), canvas)
+        saved.append(out_path.name)
+
+    html = "<div style='display:flex;flex-wrap:wrap;gap:12px'>"
+    for name in saved:
+        html += f"<a href='hybrid_visual_evidence/{name}' target='_blank'><img src='hybrid_visual_evidence/{name}' style='width:360px;border:1px solid #ccc'></a>"
+    html += "</div>"
+    (HYBRID_VIS_DIR / "index.html").write_text(html)
+    display(HTML(html))
+    print("Saved hybrid visual evidence to:", HYBRID_VIS_DIR)
+    return saved
+
+
+def detection_error_analysis(gt_by_class, pred_by_class, preds_by_image, per_class_rows):
+    rows = []
+    examples = []
+    for cls_id in range(len(CLASSES)):
+        gt_map = gt_by_class.get(cls_id, {})
+        cls_preds = sorted(pred_by_class.get(cls_id, []), key=lambda x: x["conf"], reverse=True)
+        matched = {img_id: np.zeros(len(gt_map.get(img_id, [])), dtype=bool) for img_id in gt_map}
+        tp = fp = 0
+        for pred in cls_preds:
+            img_id = pred["image_id"]
+            gts = gt_map.get(img_id, [])
+            best_iou = 0.0
+            best_j = -1
+            for j, gt_box in enumerate(gts):
+                ov = iou_xyxy(pred["xyxy"], gt_box)
+                if ov > best_iou:
+                    best_iou = ov
+                    best_j = j
+            if best_iou >= 0.5 and best_j >= 0 and not matched[img_id][best_j]:
+                matched[img_id][best_j] = True
+                tp += 1
+            else:
+                fp += 1
+                if len(examples) < 120:
+                    examples.append({
+                        "type": "false_positive",
+                        "image": img_id,
+                        "class_name": CLASSES[cls_id],
+                        "confidence": pred["conf"],
+                        "best_iou": best_iou,
+                    })
+        fn = 0
+        for img_id, flags in matched.items():
+            missing = int((~flags).sum())
+            fn += missing
+            if missing and len(examples) < 120:
+                examples.append({
+                    "type": "missed_defect",
+                    "image": img_id,
+                    "class_name": CLASSES[cls_id],
+                    "confidence": np.nan,
+                    "best_iou": np.nan,
+                })
+        rows.append({
+            "class_id": cls_id,
+            "class_name": CLASSES[cls_id],
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "precision_at_iou50": tp / max(tp + fp, 1),
+            "recall_at_iou50": tp / max(tp + fn, 1),
+        })
+
+    error_df = pd.DataFrame(rows)
+    examples_df = pd.DataFrame(examples)
+    error_df.to_csv(HYBRID_ERROR_ANALYSIS_CSV, index=False)
+    examples_df.to_csv(HYBRID_ERROR_EXAMPLES_CSV, index=False)
+    print("Saved hybrid error analysis:", HYBRID_ERROR_ANALYSIS_CSV)
+    print("Saved hybrid error examples:", HYBRID_ERROR_EXAMPLES_CSV)
+
+    yolo_pc = pd.read_csv(PER_CLASS_CSV) if PER_CLASS_CSV.exists() else pd.DataFrame()
+    hybrid_pc = pd.DataFrame(per_class_rows)
+    if not yolo_pc.empty and not hybrid_pc.empty:
+        yolo_test = yolo_pc[(yolo_pc["model"] == "YOLOv8n") & (yolo_pc["split"] == "test")]
+        hybrid_test = hybrid_pc.copy()
+        delta = hybrid_test.merge(
+            yolo_test[["class_name", "precision", "recall", "mAP50", "mAP50_95"]],
+            on="class_name",
+            suffixes=("_hybrid", "_yolo"),
+        )
+        for metric in ["precision", "recall", "mAP50", "mAP50_95"]:
+            delta[f"delta_{metric}"] = delta[f"{metric}_hybrid"] - delta[f"{metric}_yolo"]
+        delta["hybrid_outcome"] = np.where(delta["delta_mAP50_95"] >= 0, "improved_or_equal", "worse")
+        delta.to_csv(HYBRID_CLASS_DELTA_CSV, index=False)
+        print("Saved hybrid class delta:", HYBRID_CLASS_DELTA_CSV)
+        display(delta)
+    return error_df, examples_df
 
 
 def run_hybrid_fusion_eval():
     if not RUN_HYBRID_FUSION:
         print("Hybrid fusion disabled. Set RUN_HYBRID_FUSION=True to enable late-fusion evaluation.")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), default_hybrid_config()
     if not RUN_RTDETR_BENCHMARK or "rtdetr_model" not in globals():
         print("Hybrid fusion skipped: RT-DETR model is unavailable in this run.")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), default_hybrid_config()
 
-    fusion_rows = []
-    fusion_per_class_rows = []
-    for split_name in ["val", "test"]:
-        image_paths, gt_by_class = build_gt_for_split(split_name)
-        pred_by_class = {i: [] for i in range(len(CLASSES))}
-        for image_path in image_paths:
-            y_preds = predict_xyxy(model, image_path, IMG_SIZE, HYBRID_CONF)
-            r_preds = predict_xyxy(rtdetr_model, image_path, RTDETR_IMG_SIZE, HYBRID_CONF)
-            f_preds = hybrid_fuse_predictions(y_preds, r_preds, iou_thr=HYBRID_FUSION_IOU)
-            for pred in f_preds:
-                pred_by_class[pred["cls"]].append({
-                    "image_id": image_path.name,
-                    "conf": float(pred["conf"]),
-                    "xyxy": pred["xyxy"],
-                })
-
-        per_cls = evaluate_predictions(gt_by_class, pred_by_class)
-        for row in per_cls:
-            fusion_per_class_rows.append({
-                "model": "Hybrid YOLOv8n + RT-DETR-L",
-                "family": "YOLO-Transformer late fusion",
-                "split": split_name,
-                **row,
-            })
-
-        macro_p = float(np.mean([r["precision"] for r in per_cls])) if per_cls else 0.0
-        macro_r = float(np.mean([r["recall"] for r in per_cls])) if per_cls else 0.0
-        macro_ap50 = float(np.mean([r["mAP50"] for r in per_cls])) if per_cls else 0.0
-        macro_ap = float(np.mean([r["mAP50_95"] for r in per_cls])) if per_cls else 0.0
-        row = {
-            "model": "Hybrid YOLOv8n + RT-DETR-L",
-            "family": "YOLO-Transformer late fusion",
-            "split": split_name,
-            "precision": macro_p,
-            "recall": macro_r,
-            "mAP50": macro_ap50,
-            "mAP50_95": macro_ap,
-            "images": len(image_paths),
-        }
-        fusion_rows.append(row)
-        print("HYBRID", split_name.upper(), row)
-
-    fusion_df = pd.DataFrame(fusion_rows)
-    fusion_df.to_csv(HYBRID_FUSION_CSV, index=False)
-    fusion_per_class_df = pd.DataFrame(fusion_per_class_rows)
-    fusion_per_class_df.to_csv(HYBRID_PER_CLASS_CSV, index=False)
-    print("Saved hybrid fusion metrics:", HYBRID_FUSION_CSV)
-    print("Saved hybrid per-class metrics:", HYBRID_PER_CLASS_CSV)
-    display(fusion_df)
-    display(fusion_per_class_df)
-
-    architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
-    architecture_df = pd.concat([architecture_df, fusion_df.drop(columns=["images"])], ignore_index=True)
-    architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
-    print("Saved architecture comparison:", ARCHITECTURE_CSV)
-    return fusion_df, fusion_per_class_df
+    selected_config, tuning_grid_df = tune_hybrid_config()
+    (
+        fusion_df,
+        fusion_per_class_df,
+        selected_test_pred_by_class,
+        selected_test_preds_by_image,
+        selected_test_gt_by_class,
+    ) = run_selected_hybrid_eval(selected_config)
+    run_hybrid_robustness_eval(selected_config)
+    save_hybrid_visual_evidence(selected_config, split_name="test")
+    test_per_class_rows = fusion_per_class_df[fusion_per_class_df["split"] == "test"].to_dict("records")
+    detection_error_analysis(
+        selected_test_gt_by_class,
+        selected_test_pred_by_class,
+        selected_test_preds_by_image,
+        test_per_class_rows,
+    )
+    return fusion_df, fusion_per_class_df, selected_config
 
 
-def measure_hybrid_latency(image_paths, n=80, warmup=10):
+def measure_hybrid_latency(image_paths, n=80, warmup=10, config=None):
+    config = config or globals().get("selected_hybrid_config", default_hybrid_config())
     sample = image_paths[:]
     random.shuffle(sample)
     sample = sample[: min(n, len(sample))]
@@ -1080,18 +1682,18 @@ def measure_hybrid_latency(image_paths, n=80, warmup=10):
         return {}
 
     for p in sample[: min(warmup, len(sample))]:
-        y = predict_xyxy(model, p, IMG_SIZE, HYBRID_CONF)
-        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, HYBRID_CONF)
-        _ = hybrid_fuse_predictions(y, r, iou_thr=HYBRID_FUSION_IOU)
+        y = predict_xyxy(model, p, IMG_SIZE, float(config["conf"]))
+        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, float(config["conf"]))
+        _ = hybrid_fuse_predictions_config(y, r, config)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
     timings = []
     for p in sample:
         start = time.perf_counter()
-        y = predict_xyxy(model, p, IMG_SIZE, HYBRID_CONF)
-        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, HYBRID_CONF)
-        _ = hybrid_fuse_predictions(y, r, iou_thr=HYBRID_FUSION_IOU)
+        y = predict_xyxy(model, p, IMG_SIZE, float(config["conf"]))
+        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, float(config["conf"]))
+        _ = hybrid_fuse_predictions_config(y, r, config)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         timings.append((time.perf_counter() - start) * 1000.0)
@@ -1106,7 +1708,381 @@ def measure_hybrid_latency(image_paths, n=80, warmup=10):
     }
 
 
-hybrid_fusion_df, hybrid_per_class_df = run_hybrid_fusion_eval()
+hybrid_fusion_df, hybrid_per_class_df, selected_hybrid_config = run_hybrid_fusion_eval()
+"""
+    ),
+    code_cell(
+        """
+class PatchRefinerDataset(Dataset):
+    def __init__(self, samples, patch_size):
+        self.samples = samples
+        self.patch_size = patch_size
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        image_path, xyxy, label = self.samples[idx]
+        image = cv2.imread(str(image_path))
+        if image is None:
+            patch = np.zeros((self.patch_size, self.patch_size, 3), dtype=np.uint8)
+        else:
+            patch = crop_resize_patch(image, xyxy, self.patch_size)
+        patch = cv2.cvtColor(patch, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        tensor = torch.from_numpy(patch.transpose(2, 0, 1))
+        return tensor, torch.tensor(int(label), dtype=torch.long)
+
+
+class CNNTransformerPatchRefiner(nn.Module):
+    def __init__(self, num_classes, patch_size=96, d_model=128, nhead=4, depth=2):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.SiLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+            nn.Conv2d(64, d_model, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(d_model),
+            nn.SiLU(),
+        )
+        token_side = patch_size // 8
+        max_tokens = token_side * token_side + 1
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_embed = nn.Parameter(torch.randn(1, max_tokens, d_model) * 0.02)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=d_model * 4,
+            dropout=0.1,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, num_classes),
+        )
+
+    def forward(self, x):
+        feats = self.cnn(x)
+        tokens = feats.flatten(2).transpose(1, 2)
+        cls = self.cls_token.expand(tokens.shape[0], -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)
+        tokens = tokens + self.pos_embed[:, :tokens.shape[1], :]
+        encoded = self.transformer(tokens)
+        return self.head(encoded[:, 0])
+
+
+def clamp_xyxy(xyxy, width, height):
+    x1, y1, x2, y2 = [float(v) for v in xyxy]
+    x1 = max(0.0, min(float(width - 1), x1))
+    y1 = max(0.0, min(float(height - 1), y1))
+    x2 = max(0.0, min(float(width), x2))
+    y2 = max(0.0, min(float(height), y2))
+    if x2 <= x1 + 1:
+        x2 = min(float(width), x1 + 2)
+    if y2 <= y1 + 1:
+        y2 = min(float(height), y1 + 2)
+    return [x1, y1, x2, y2]
+
+
+def expand_xyxy(xyxy, width, height, scale=1.8):
+    x1, y1, x2, y2 = xyxy
+    bw = max(2.0, x2 - x1)
+    bh = max(2.0, y2 - y1)
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    nw = bw * scale
+    nh = bh * scale
+    return clamp_xyxy([cx - nw / 2.0, cy - nh / 2.0, cx + nw / 2.0, cy + nh / 2.0], width, height)
+
+
+def crop_resize_patch(image, xyxy, patch_size):
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = [int(round(v)) for v in clamp_xyxy(xyxy, w, h)]
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        crop = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
+    return cv2.resize(crop, (patch_size, patch_size), interpolation=cv2.INTER_LINEAR)
+
+
+def yolo_row_to_expanded_xyxy(row, width, height, scale=1.8):
+    cls_id, xc, yc, bw, bh = row
+    x1 = (xc - bw / 2.0) * width
+    y1 = (yc - bh / 2.0) * height
+    x2 = (xc + bw / 2.0) * width
+    y2 = (yc + bh / 2.0) * height
+    return expand_xyxy([x1, y1, x2, y2], width, height, scale=scale)
+
+
+def build_patch_refiner_samples():
+    train_img_dir = YOLO_ROOT / "train/images"
+    train_lbl_dir = YOLO_ROOT / "train/labels"
+    rng = random.Random(SEED)
+
+    positives_by_class = {i: [] for i in range(len(CLASSES))}
+    image_paths = sorted(train_img_dir.glob("*.*"))
+    labels_by_image = {}
+
+    for image_path in image_paths:
+        rows = read_train_yolo_file(train_lbl_dir / f"{image_path.stem}.txt")
+        labels_by_image[image_path] = rows
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        for row in rows:
+            cls_id = row[0]
+            xyxy = yolo_row_to_expanded_xyxy(row, w, h, scale=1.8)
+            positives_by_class[cls_id].append((image_path, xyxy, cls_id + 1))
+
+    samples = []
+    for cls_id, cls_samples in positives_by_class.items():
+        rng.shuffle(cls_samples)
+        samples.extend(cls_samples[: min(REFINER_MAX_POSITIVE_PER_CLASS, len(cls_samples))])
+
+    negatives = []
+    attempts = 0
+    while len(negatives) < REFINER_NEGATIVE_SAMPLES and attempts < REFINER_NEGATIVE_SAMPLES * 30 and image_paths:
+        attempts += 1
+        image_path = rng.choice(image_paths)
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        side = rng.randint(max(24, min(w, h) // 20), max(32, min(w, h) // 4))
+        x1 = rng.randint(0, max(0, w - side - 1))
+        y1 = rng.randint(0, max(0, h - side - 1))
+        cand = [x1, y1, x1 + side, y1 + side]
+        gt_boxes = []
+        for row in labels_by_image.get(image_path, []):
+            gt_boxes.append(yolo_row_to_expanded_xyxy(row, w, h, scale=1.1))
+        if all(iou_xyxy(cand, gt) < 0.05 for gt in gt_boxes):
+            negatives.append((image_path, cand, 0))
+
+    samples.extend(negatives)
+    rng.shuffle(samples)
+    counts = Counter(label for _, _, label in samples)
+    print("CNN-Transformer refiner samples:", dict(counts))
+    return samples
+
+
+def train_cnn_transformer_refiner():
+    if not RUN_CNN_TRANSFORMER_REFINER:
+        print("CNN-Transformer feature refiner disabled.")
+        return None, pd.DataFrame()
+
+    samples = build_patch_refiner_samples()
+    if not samples:
+        print("No samples available for CNN-Transformer feature refiner.")
+        return None, pd.DataFrame()
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    split_idx = int(len(samples) * 0.9)
+    train_samples = samples[:split_idx]
+    val_samples = samples[split_idx:]
+
+    train_ds = PatchRefinerDataset(train_samples, REFINER_PATCH_SIZE)
+    val_ds = PatchRefinerDataset(val_samples, REFINER_PATCH_SIZE)
+    train_loader = DataLoader(train_ds, batch_size=REFINER_BATCH, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_ds, batch_size=REFINER_BATCH, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    refiner = CNNTransformerPatchRefiner(num_classes=len(CLASSES) + 1, patch_size=REFINER_PATCH_SIZE).to(device)
+    optimizer = torch.optim.AdamW(refiner.parameters(), lr=3e-4, weight_decay=1e-4)
+    criterion = nn.CrossEntropyLoss()
+    history = []
+
+    for epoch in range(1, REFINER_EPOCHS + 1):
+        refiner.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        for xb, yb in train_loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            logits = refiner(xb)
+            loss = criterion(logits, yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += float(loss.item()) * xb.shape[0]
+            train_correct += int((logits.argmax(1) == yb).sum().item())
+            train_total += int(xb.shape[0])
+
+        refiner.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb = xb.to(device, non_blocking=True)
+                yb = yb.to(device, non_blocking=True)
+                logits = refiner(xb)
+                loss = criterion(logits, yb)
+                val_loss += float(loss.item()) * xb.shape[0]
+                val_correct += int((logits.argmax(1) == yb).sum().item())
+                val_total += int(xb.shape[0])
+
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss / max(train_total, 1),
+            "train_accuracy": train_correct / max(train_total, 1),
+            "val_loss": val_loss / max(val_total, 1),
+            "val_accuracy": val_correct / max(val_total, 1),
+            "train_samples": train_total,
+            "val_samples": val_total,
+        }
+        history.append(row)
+        print("REFINER", row)
+
+    history_df = pd.DataFrame(history)
+    history_df.to_csv(REFINER_TRAINING_CSV, index=False)
+    display(history_df)
+    print("Saved CNN-Transformer refiner training history:", REFINER_TRAINING_CSV)
+    return refiner, history_df
+
+
+def refiner_candidate_score(refiner, image_path, pred):
+    image = cv2.imread(str(image_path))
+    if image is None:
+        return 0.0, 0
+    device = next(refiner.parameters()).device
+    patch = crop_resize_patch(image, pred["xyxy"], REFINER_PATCH_SIZE)
+    patch = cv2.cvtColor(patch, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    tensor = torch.from_numpy(patch.transpose(2, 0, 1)).unsqueeze(0).to(device)
+    with torch.no_grad():
+        probs = torch.softmax(refiner(tensor), dim=1)[0].detach().cpu().numpy()
+    predicted_label = int(np.argmax(probs))
+    expected_label = int(pred["cls"]) + 1
+    return float(probs[expected_label]), predicted_label
+
+
+def refiner_filter_predictions(refiner, image_path, preds):
+    if refiner is None:
+        return preds
+    kept = []
+    for pred in preds:
+        class_prob, predicted_label = refiner_candidate_score(refiner, image_path, pred)
+        expected_label = int(pred["cls"]) + 1
+        if predicted_label == expected_label and class_prob >= REFINER_KEEP_PROB:
+            out = dict(pred)
+            out["conf"] = float(min(1.0, 0.5 * out["conf"] + 0.5 * class_prob))
+            out["refiner_prob"] = class_prob
+            kept.append(out)
+    return nms_class_aware(kept, iou_thr=0.55)
+
+
+def run_refined_hybrid_eval(refiner):
+    if refiner is None:
+        return pd.DataFrame(), pd.DataFrame()
+    if not RUN_RTDETR_BENCHMARK or "rtdetr_model" not in globals():
+        print("CNN-Transformer refined hybrid skipped: RT-DETR model is unavailable.")
+        return pd.DataFrame(), pd.DataFrame()
+
+    rows = []
+    per_class_rows = []
+    refiner.eval()
+
+    for split_name in ["val", "test"]:
+        image_paths, gt_by_class = build_gt_for_split(split_name)
+        pred_by_class = {i: [] for i in range(len(CLASSES))}
+        base_config = globals().get("selected_hybrid_config", default_hybrid_config())
+        for image_path in image_paths:
+            y_preds = predict_xyxy(model, image_path, IMG_SIZE, REFINER_CANDIDATE_CONF)
+            r_preds = predict_xyxy(rtdetr_model, image_path, RTDETR_IMG_SIZE, REFINER_CANDIDATE_CONF)
+            fused = hybrid_fuse_predictions_config(y_preds, r_preds, base_config)
+            refined = refiner_filter_predictions(refiner, image_path, fused)
+            for pred in refined:
+                pred_by_class[pred["cls"]].append({
+                    "image_id": image_path.name,
+                    "conf": float(pred["conf"]),
+                    "xyxy": pred["xyxy"],
+                })
+
+        per_cls = evaluate_predictions(gt_by_class, pred_by_class)
+        for row in per_cls:
+            per_class_rows.append({
+                "model": "Custom CNN-Transformer refined hybrid",
+                "family": "Feature-level CNN-Transformer refiner",
+                "split": split_name,
+                **row,
+            })
+        row = {
+            "model": "Custom CNN-Transformer refined hybrid",
+            "family": "Feature-level CNN-Transformer refiner",
+            "split": split_name,
+            "precision": float(np.mean([r["precision"] for r in per_cls])) if per_cls else 0.0,
+            "recall": float(np.mean([r["recall"] for r in per_cls])) if per_cls else 0.0,
+            "mAP50": float(np.mean([r["mAP50"] for r in per_cls])) if per_cls else 0.0,
+            "mAP50_95": float(np.mean([r["mAP50_95"] for r in per_cls])) if per_cls else 0.0,
+            "images": len(image_paths),
+            "refiner_keep_prob": REFINER_KEEP_PROB,
+            "candidate_conf": REFINER_CANDIDATE_CONF,
+        }
+        rows.append(row)
+        print("CNN-TRANSFORMER REFINED HYBRID", split_name.upper(), row)
+
+    metrics_df = pd.DataFrame(rows)
+    per_class_df = pd.DataFrame(per_class_rows)
+    metrics_df.to_csv(REFINER_METRICS_CSV, index=False)
+    per_class_df.to_csv(REFINER_PER_CLASS_CSV, index=False)
+    display(metrics_df)
+    display(per_class_df)
+    print("Saved CNN-Transformer refined hybrid metrics:", REFINER_METRICS_CSV)
+    print("Saved CNN-Transformer refined hybrid per-class metrics:", REFINER_PER_CLASS_CSV)
+
+    architecture_df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
+    architecture_df = pd.concat([architecture_df, metrics_df.drop(columns=["images", "refiner_keep_prob", "candidate_conf"])], ignore_index=True)
+    architecture_df.to_csv(ARCHITECTURE_CSV, index=False)
+    print("Saved architecture comparison:", ARCHITECTURE_CSV)
+    return metrics_df, per_class_df
+
+
+def measure_refined_hybrid_latency(refiner, image_paths, n=80, warmup=10):
+    if refiner is None or "rtdetr_model" not in globals():
+        return {}
+    sample = image_paths[:]
+    random.shuffle(sample)
+    sample = sample[: min(n, len(sample))]
+    if not sample:
+        return {}
+
+    refiner.eval()
+    base_config = globals().get("selected_hybrid_config", default_hybrid_config())
+    for p in sample[: min(warmup, len(sample))]:
+        y = predict_xyxy(model, p, IMG_SIZE, REFINER_CANDIDATE_CONF)
+        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, REFINER_CANDIDATE_CONF)
+        fused = hybrid_fuse_predictions_config(y, r, base_config)
+        _ = refiner_filter_predictions(refiner, p, fused)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    timings = []
+    for p in sample:
+        start = time.perf_counter()
+        y = predict_xyxy(model, p, IMG_SIZE, REFINER_CANDIDATE_CONF)
+        r = predict_xyxy(rtdetr_model, p, RTDETR_IMG_SIZE, REFINER_CANDIDATE_CONF)
+        fused = hybrid_fuse_predictions_config(y, r, base_config)
+        _ = refiner_filter_predictions(refiner, p, fused)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        timings.append((time.perf_counter() - start) * 1000.0)
+
+    return {
+        "images": len(sample),
+        "mean_ms": float(np.mean(timings)),
+        "p50_ms": float(np.percentile(timings, 50)),
+        "p95_ms": float(np.percentile(timings, 95)),
+        "fps": float(1000.0 / np.mean(timings)),
+        "under_100ms_target": bool(np.mean(timings) < 100.0),
+    }
+
+
+cnn_transformer_refiner, cnn_transformer_refiner_history = train_cnn_transformer_refiner()
+refined_hybrid_df, refined_hybrid_per_class_df = run_refined_hybrid_eval(cnn_transformer_refiner)
 """
     ),
     code_cell(
@@ -1271,6 +2247,10 @@ if RUN_RTDETR_BENCHMARK:
         )
 if RUN_HYBRID_FUSION and RUN_RTDETR_BENCHMARK and "rtdetr_model" in globals():
     latency_summary["hybrid_yolo_rtdetr_fusion"] = measure_hybrid_latency(test_paths, n=80, warmup=10)
+if RUN_CNN_TRANSFORMER_REFINER and "cnn_transformer_refiner" in globals() and cnn_transformer_refiner is not None:
+    latency_summary["cnn_transformer_refined_hybrid"] = measure_refined_hybrid_latency(
+        cnn_transformer_refiner, test_paths, n=80, warmup=10
+    )
 
 print("Latency summary:", latency_summary)
 (WORK_DIR / "latency_summary.json").write_text(json.dumps(latency_summary, indent=2))
@@ -1348,6 +2328,7 @@ if not architecture_df.empty and not latency_df.empty:
             "mAP50": h_arch.get("mAP50", np.nan),
             "mAP50_95": h_arch.get("mAP50_95", np.nan),
             "mean_latency_ms": h_lat.get("mean_ms", np.nan),
+            "p95_latency_ms": h_lat.get("p95_ms", np.nan),
             "under_100ms_target": h_lat.get("under_100ms_target", False),
         })
 
@@ -1380,7 +2361,17 @@ else:
     exported["tensorrt_note"] = "Disabled by default. Jetson TensorRT engines should be built on the Jetson target for final deployment."
 
 (WORK_DIR / "deployment_exports.json").write_text(json.dumps(exported, indent=2))
+jetson_status = {
+    "onnx_export": exported.get("onnx"),
+    "tensorrt_status": "prepared_not_built_on_kaggle" if not RUN_TENSORRT_EXPORT else "attempted_in_current_runtime",
+    "jetson_note": "Final TensorRT engine should be built and benchmarked on the NVIDIA Jetson Orin target because TensorRT engines are hardware/runtime specific.",
+    "recommended_jetson_command": "yolo export model=best.pt format=engine imgsz=640 half=True device=0",
+    "mean_latency_requirement_ms": 100,
+    "reporting_note": "Report ONNX as completed; report TensorRT as deployment path prepared unless a Jetson Orin run produces an engine and latency measurement.",
+}
+JETSON_DEPLOYMENT_STATUS_JSON.write_text(json.dumps(jetson_status, indent=2))
 print(exported)
+print("Saved Jetson/TensorRT deployment status:", JETSON_DEPLOYMENT_STATUS_JSON)
 """
     ),
     code_cell(
@@ -1429,14 +2420,19 @@ else:
 traceability = pd.DataFrame([
     ["Detect and localize six PCB defect classes", "YOLO dataset conversion, DsPCBSD+ overlap merge, YOLOv8 training, prediction gallery"],
     ["Improve dataset realism and size", "Adds DsPCBSD+ real PCB images from Figshare DOI 10.6084/m9.figshare.24970329.v1 for overlapping classes"],
-    ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, multi-scale-ready YOLO training, plus Albumentations robustness tests; mild synthetic Gaussian noise in robustness evaluation and documented training-noise limitation"],
+    ["Mitigate class imbalance with synthetic augmentation", "Generates copy-paste synthetic defect images for weak/rare classes as a practical TransGAN-style class-balancing surrogate; summary saved to synthetic_augmentation_summary.csv"],
+    ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, synthetic defect augmentation, multi-scale-ready YOLO training, plus Albumentations robustness tests; mild synthetic Gaussian noise in robustness evaluation and documented training-noise limitation"],
     ["Report precision, recall, mAP", "Validation and held-out test metrics saved to project_metrics_summary.csv with per-class metrics in per_class_metrics.csv"],
     ["Evaluate robustness under imaging variation", "robustness_metrics.csv records clean, brightness/contrast, noise, blur, and rotation stress tests"],
-    ["Meet real-time target under 100 ms/image", "latency_summary.json records mean, p50, p95 latency per model (YOLOv8n; RT-DETR-L when benchmark runs) and 100 ms pass/fail"],
-    ["Provide deployment artifact", "ONNX export plus optional TensorRT export path"],
+    ["Evaluate hybrid robustness under imaging variation", "hybrid_robustness_metrics.csv records the selected tuned hybrid under clean, brightness/contrast, noise, blur, and rotation conditions"],
+    ["Meet real-time target under 100 ms/image", "latency_summary.json and latency_comparison.csv record mean, p50, p95 latency per model (YOLOv8n, RT-DETR-L, tuned hybrid, and refined hybrid when phases run) and 100 ms pass/fail"],
+    ["Provide deployment artifact", "ONNX export plus Jetson/TensorRT deployment status in jetson_deployment_status.json; final TensorRT engine should be built on Jetson Orin"],
     ["Compare CNN and Transformer-style detectors", "architecture_comparison.csv records YOLOv8n and RT-DETR-L on val and test splits"],
-    ["Implement Hybrid YOLO-Transformer detection", "YOLOv8n proposal detector + RT-DETR-L transformer-style validation/refinement with late-fusion evaluation."],
-    ["Provide interpretable visual output", "Ground-truth vs prediction plots and saved prediction gallery"],
+    ["Implement Hybrid YOLO-Transformer detection", "YOLOv8n proposal detector + RT-DETR-L transformer-style validation/refinement with tuned late-fusion evaluation."],
+    ["Tune hybrid model using validation only", "hybrid_tuning_grid.csv sweeps confidence, fusion IoU, fusion mode, and class-aware NMS; hybrid_selected_config.json stores the selected validation config; hybrid_selected_test_metrics.csv evaluates that config on test"],
+    ["Analyze hybrid errors", "hybrid_error_analysis.csv, hybrid_error_examples.csv, and hybrid_class_delta.csv summarize false positives, missed defects, and class-level gains/failures"],
+    ["Implement custom feature-level CNN-Transformer model", "Trains a custom CNN-Transformer patch refiner on defect/background crops and evaluates refined hybrid predictions in cnn_transformer_refined_hybrid_metrics.csv"],
+    ["Provide interpretable visual output", "Ground-truth vs YOLO vs RT-DETR vs tuned hybrid comparison panels saved under hybrid_visual_evidence plus standard prediction gallery"],
 ])
 traceability.columns = ["Proposal requirement", "Notebook implementation"]
 display(traceability)
