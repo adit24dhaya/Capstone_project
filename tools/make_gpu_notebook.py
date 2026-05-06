@@ -1507,6 +1507,23 @@ def grid_row_to_hybrid_config(row, model_class_weights):
     }
 
 
+def json_safe_scalar(value):
+    if isinstance(value, (dict, list, tuple)):
+        return value
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
+
+
 def select_validation_profile_rows_v11(grid_df):
     # Pick three validation-only profiles from the same grid as hybrid_tuning_grid_v2.
     out = {}
@@ -1594,9 +1611,9 @@ def run_hybrid_pareto_v11_profiles(grid_df, model_class_weights):
         ]
         payload["profiles"][profile_name] = {
             "selection": sel_meta,
-            "validation_metrics": {k: float(row[k]) for k in val_keys if k in row.index},
+            "validation_metrics": {k: json_safe_scalar(row[k]) for k in val_keys if k in row.index},
             "config": cfg,
-            "test_summary": {k: trow[k] for k in ["precision", "recall", "mAP50", "mAP50_95", "f1", "f0_5", "false_positives_per_image", "tp_iou50", "fp_iou50", "fn_iou50"] if k in trow},
+            "test_summary": {k: json_safe_scalar(trow[k]) for k in ["precision", "recall", "mAP50", "mAP50_95", "f1", "f0_5", "false_positives_per_image", "tp_iou50", "fp_iou50", "fn_iou50"] if k in trow},
         }
 
     pd.DataFrame(test_records).to_csv(HYBRID_SELECTED_PROFILES_TEST_CSV, index=False)
