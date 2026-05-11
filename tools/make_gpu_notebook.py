@@ -153,7 +153,7 @@ RTDETR_EPOCHS = 10
 RTDETR_BATCH = 4
 RTDETR_IMG_SIZE = 640
 RUN_ROBUSTNESS_TESTS = True
-ROBUSTNESS_SAMPLE_SIZE = 250
+ROBUSTNESS_SAMPLE_SIZE = 150
 RUN_TENSORRT_EXPORT = False
 USE_DSPCBSD_PLUS = True
 MAX_DSPCBSD_PLUS_IMAGES = None
@@ -169,7 +169,7 @@ HYBRID_CONF = 0.01
 HYBRID_FUSION_IOU = 0.55
 HYBRID_EVAL_SAMPLE_SIZE = None
 RUN_HYBRID_TUNING = True
-HYBRID_TUNING_CONF_VALUES = [0.15, 0.20, 0.25, 0.30]
+HYBRID_TUNING_CONF_VALUES = [0.15, 0.25, 0.30]
 HYBRID_TUNING_IOU_VALUES = [0.40, 0.45, 0.55]
 HYBRID_TUNING_MODES = ["agreement_only", "weighted_fusion", "single_high_conf_fallback", "class_weighted_fusion"]
 HYBRID_TUNING_NMS_VALUES = [0.45, 0.60]
@@ -179,10 +179,10 @@ HYBRID_TUNING_PRECISION_FLOORS = [0.65, 0.70, 0.75]
 HYBRID_MIN_PRECISION_FOR_SELECTION = 0.65
 HYBRID_MIN_RECALL_FOR_SELECTION = 0.78
 HYBRID_MIN_MAP50_FOR_SELECTION = 0.82
-HYBRID_TUNING_SAMPLE_SIZE = 350
+HYBRID_TUNING_SAMPLE_SIZE = 250
 HYBRID_VISUAL_SAMPLE_SIZE = 12
 FINAL_PROFILE_NAME = "balanced"
-RUN_CNN_TRANSFORMER_REFINER = True
+RUN_CNN_TRANSFORMER_REFINER = False
 REFINER_EPOCHS = 5
 REFINER_BATCH = 64
 REFINER_PATCH_SIZE = 96
@@ -806,7 +806,7 @@ train_results = model.train(
     epochs=EPOCHS,
     batch=BATCH,
     device=0,
-    workers=2,
+    workers=4,
     project=str(WORK_DIR / "runs/detect"),
     name="train",
     exist_ok=True,
@@ -1113,7 +1113,7 @@ if RUN_RTDETR_BENCHMARK:
         imgsz=RTDETR_IMG_SIZE,
         batch=RTDETR_BATCH,
         device=0,
-        workers=2,
+        workers=4,
         project=str(WORK_DIR / "runs/rtdetr"),
         name="train",
         exist_ok=True,
@@ -2609,7 +2609,7 @@ final_balanced_robustness_df = run_final_balanced_robustness(final_cfg)
     ),
     code_cell(
         """
-def benchmark_callable(name, fn, warmup=10, runs=100):
+def benchmark_callable(name, fn, warmup=10, runs=50):
     for _ in tqdm(range(warmup), desc=f"{name} warmup"):
         fn()
     if torch.cuda.is_available():
@@ -3990,16 +3990,16 @@ def measure_latency(predict_model, image_paths, imgsz, n=80, warmup=10, conf=0.2
 
 test_paths = sorted(TEST_IMG_DIR.glob("*.*"))
 latency_summary = {
-    "yolo11s": measure_latency(model, test_paths, IMG_SIZE, n=80, warmup=10, conf=0.25),
+    "yolo11s": measure_latency(model, test_paths, IMG_SIZE, n=50, warmup=10, conf=0.25),
 }
 if RUN_RTDETR_BENCHMARK:
     rtdetr_m = globals().get("rtdetr_model")
     if rtdetr_m is not None:
         latency_summary["rtdetr_l"] = measure_latency(
-            rtdetr_m, test_paths, RTDETR_IMG_SIZE, n=80, warmup=10, conf=0.25
+            rtdetr_m, test_paths, RTDETR_IMG_SIZE, n=50, warmup=10, conf=0.25
         )
 if RUN_HYBRID_FUSION and RUN_RTDETR_BENCHMARK and "rtdetr_model" in globals():
-    latency_summary["hybrid_yolo_rtdetr_fusion"] = measure_hybrid_latency(test_paths, n=80, warmup=10)
+    latency_summary["hybrid_yolo_rtdetr_fusion"] = measure_hybrid_latency(test_paths, n=50, warmup=10)
 if RUN_CNN_TRANSFORMER_REFINER and "cnn_transformer_refiner" in globals() and cnn_transformer_refiner is not None:
     latency_summary["cnn_transformer_refined_hybrid"] = measure_refined_hybrid_latency(
         cnn_transformer_refiner, test_paths, n=80, warmup=10
@@ -4130,8 +4130,9 @@ print("Saved Jetson/TensorRT deployment status:", JETSON_DEPLOYMENT_STATUS_JSON)
     code_cell(
         """
 PRED_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+gallery_sources = [str(p) for p in sorted(VAL_IMG_DIR.glob("*.*"))[:36]]
 predict_results = model.predict(
-    source=str(VAL_IMG_DIR),
+    source=gallery_sources,
     conf=0.01,
     iou=0.7,
     imgsz=IMG_SIZE,
