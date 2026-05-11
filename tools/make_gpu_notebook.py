@@ -147,7 +147,7 @@ VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 EPOCHS = 50
 IMG_SIZE = 1280
-BATCH = 8
+BATCH = 12
 RUN_RTDETR_BENCHMARK = True
 RTDETR_EPOCHS = 10
 RTDETR_BATCH = 4
@@ -190,6 +190,8 @@ REFINER_MAX_POSITIVE_PER_CLASS = 650
 REFINER_NEGATIVE_SAMPLES = 1600
 REFINER_KEEP_PROB = 0.45
 REFINER_CANDIDATE_CONF = 0.03
+RUN_PUBLICATION_ANALYSIS = True
+ANALYSIS_SINGLE_MODEL_CONF = 0.05
 
 DSPCBSD_PLUS_URL = "https://ndownloader.figshare.com/files/44069552"
 DSPCBSD_PLUS_MD5 = "508334b65bdaea7336f4c1b5d5a80a81"
@@ -231,7 +233,8 @@ DSPCBSD_TO_PROJECT_CLASS = {
 }
 
 WORK_DIR = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path("working")
-CACHE_DIR = Path("/kaggle/temp") if Path("/kaggle/temp").exists() else WORK_DIR / "external"
+CACHE_DIR = Path("/kaggle/temp") if Path("/kaggle").exists() else WORK_DIR / "external"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 YOLO_ROOT = CACHE_DIR / "YOLO_PCB"
 DATA_YAML = YOLO_ROOT / "data.yaml"
 RUN_DIR = WORK_DIR / "runs/detect/train"
@@ -283,6 +286,16 @@ REFINER_TRAINING_CSV = WORK_DIR / "cnn_transformer_refiner_training.csv"
 REFINER_METRICS_CSV = WORK_DIR / "cnn_transformer_refined_hybrid_metrics.csv"
 REFINER_PER_CLASS_CSV = WORK_DIR / "cnn_transformer_refined_hybrid_per_class.csv"
 JETSON_DEPLOYMENT_STATUS_JSON = WORK_DIR / "jetson_deployment_status.json"
+DEFECT_SIZE_ANALYSIS_CSV = WORK_DIR / "defect_size_analysis.csv"
+ADAPTIVE_POLICY_JSON = WORK_DIR / "adaptive_defect_aware_policy.json"
+ADAPTIVE_POLICY_CSV = WORK_DIR / "adaptive_defect_aware_policy.csv"
+ADAPTIVE_TEST_CSV = WORK_DIR / "adaptive_defect_aware_hybrid_test_metrics.csv"
+ADAPTIVE_PER_CLASS_CSV = WORK_DIR / "adaptive_defect_aware_hybrid_per_class_metrics.csv"
+ADAPTIVE_SIZE_ANALYSIS_CSV = WORK_DIR / "adaptive_defect_aware_size_analysis.csv"
+INSPECTION_COST_CSV = WORK_DIR / "industrial_inspection_cost_metrics.csv"
+CALIBRATION_METRICS_CSV = WORK_DIR / "calibration_metrics.csv"
+CALIBRATION_RELIABILITY_CSV = WORK_DIR / "calibration_reliability_bins.csv"
+CALIBRATION_RELIABILITY_PLOT = WORK_DIR / "calibration_reliability_plot.png"
 
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
@@ -2818,6 +2831,561 @@ final_balanced_visual_paths = save_final_balanced_visual_evidence(final_cfg)
     ),
     markdown_cell(
         """
+## Final Publication Analyses: Size, Adaptive Fusion, Cost, and Calibration
+"""
+    ),
+    code_cell(
+        """
+SIZE_BINS = [
+    {"size_bin": "tiny", "min_ratio": 0.0, "max_ratio": 0.001},
+    {"size_bin": "small", "min_ratio": 0.001, "max_ratio": 0.005},
+    {"size_bin": "medium", "min_ratio": 0.005, "max_ratio": 0.02},
+    {"size_bin": "large", "min_ratio": 0.02, "max_ratio": float("inf")},
+]
+
+
+def image_dimensions_by_name(image_paths):
+    dims = {}
+    for image_path in image_paths:
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        dims[image_path.name] = (int(w), int(h))
+    return dims
+
+
+def box_area_ratio(box, image_dims):
+    w, h = image_dims
+    area = max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+    return float(area / max(float(w * h), 1.0))
+
+
+def assign_size_bin(area_ratio):
+    for item in SIZE_BINS:
+        if float(item["min_ratio"]) <= area_ratio < float(item["max_ratio"]):
+            return item["size_bin"]
+    return SIZE_BINS[-1]["size_bin"]
+
+
+def append_prediction_maps(pred_by_class, preds_by_image, image_name, preds):
+    preds_by_image[image_name] = preds
+    for pred in preds:
+        pred_by_class[int(pred["cls"])].append({
+            "image_id": image_name,
+            "conf": float(pred["conf"]),
+            "xyxy": [float(v) for v in pred["xyxy"]],
+        })
+
+
+def collect_single_model_analysis_predictions(image_paths):
+    yolo_pred_by_class = {i: [] for i in range(len(CLASSES))}
+    yolo_preds_by_image = {}
+    rtdetr_pred_by_class = {i: [] for i in range(len(CLASSES))}
+    rtdetr_preds_by_image = {}
+
+    for image_path in tqdm(image_paths, desc="Single-model analysis predictions"):
+        yolo_preds = nms_class_aware(
+            predict_xyxy(model, image_path, IMG_SIZE, ANALYSIS_SINGLE_MODEL_CONF, augment=False),
+            iou_thr=0.60,
+        )
+        append_prediction_maps(yolo_pred_by_class, yolo_preds_by_image, image_path.name, yolo_preds)
+
+        if RUN_RTDETR_BENCHMARK and "rtdetr_model" in globals():
+            rtdetr_preds = nms_class_aware(
+                predict_xyxy(rtdetr_model, image_path, RTDETR_IMG_SIZE, ANALYSIS_SINGLE_MODEL_CONF, augment=False),
+                iou_thr=0.60,
+            )
+        else:
+            rtdetr_preds = []
+        append_prediction_maps(rtdetr_pred_by_class, rtdetr_preds_by_image, image_path.name, rtdetr_preds)
+
+    return {
+        "YOLO11s": (yolo_pred_by_class, yolo_preds_by_image),
+        "RT-DETR-L": (rtdetr_pred_by_class, rtdetr_preds_by_image),
+    }
+
+
+def selected_profile_configs_or_fallback():
+    payload = {}
+    if HYBRID_SELECTED_PROFILES_CONFIG_JSON.exists():
+        try:
+            payload = json.loads(HYBRID_SELECTED_PROFILES_CONFIG_JSON.read_text())
+        except Exception:
+            payload = {}
+    profile_configs = {}
+    for name, item in payload.get("profiles", {}).items():
+        cfg = item.get("config", {})
+        if cfg:
+            profile_configs[name] = cfg
+    if "balanced" not in profile_configs:
+        profile_configs["balanced"] = dict(selected_hybrid_config)
+    if "high_precision" not in profile_configs:
+        cfg = dict(selected_hybrid_config)
+        cfg["mode"] = "agreement_only"
+        cfg["conf"] = max(float(cfg.get("conf", 0.15)), 0.25)
+        cfg["single_model_conf"] = max(float(cfg.get("single_model_conf", 0.6)), 0.7)
+        profile_configs["high_precision"] = cfg
+    if "high_recall" not in profile_configs:
+        cfg = dict(selected_hybrid_config)
+        cfg["mode"] = "single_high_conf_fallback"
+        cfg["conf"] = min(float(cfg.get("conf", 0.15)), 0.15)
+        cfg["single_model_conf"] = min(float(cfg.get("single_model_conf", 0.6)), 0.5)
+        profile_configs["high_recall"] = cfg
+    return profile_configs
+
+
+def best_agreement_stats(yolo_boxes, rtdetr_boxes):
+    best_iou = 0.0
+    best_gap = 1.0
+    best_mean_conf = 0.0
+    for y in yolo_boxes:
+        for r in rtdetr_boxes:
+            if int(y["cls"]) != int(r["cls"]):
+                continue
+            ov = iou_xyxy(y["xyxy"], r["xyxy"])
+            if ov > best_iou:
+                best_iou = ov
+                best_gap = abs(float(y["conf"]) - float(r["conf"]))
+                best_mean_conf = (float(y["conf"]) + float(r["conf"])) / 2.0
+    return {"agreement_iou": float(best_iou), "confidence_gap": float(best_gap), "mean_confidence": float(best_mean_conf)}
+
+
+def build_adaptive_defect_policy(profile_configs):
+    val_paths, val_gt = build_gt_for_split("val")
+    min_conf = min(float(cfg.get("conf", 0.15)) for cfg in profile_configs.values())
+    val_cache = collect_hybrid_prediction_cache(val_paths, min_conf)
+    profile_per_class = {}
+    profile_summary_rows = []
+
+    for profile_name, cfg in profile_configs.items():
+        row, per_cls, _, _ = evaluate_cached_hybrid(
+            val_cache,
+            val_gt,
+            cfg,
+            "val_policy",
+            model_name=f"Hybrid YOLO11s + RT-DETR-L ({profile_name})",
+        )
+        profile_summary_rows.append({"profile_name": profile_name, **row})
+        profile_per_class[profile_name] = {int(r["class_id"]): r for r in per_cls}
+
+    gt_counts = []
+    for cls_id in range(len(CLASSES)):
+        gt_counts.append(sum(len(v) for v in val_gt.get(cls_id, {}).values()))
+    rare_cutoff = float(np.percentile(gt_counts, 35)) if gt_counts else 0.0
+
+    policy_rows = []
+    policy = {
+        "version": "adaptive_defect_aware_v15",
+        "selection_split": "val",
+        "description": "Validation-calibrated per-class fusion policy using agreement score, confidence gap, class rarity, and FP/FN-sensitive selection.",
+        "rare_class_cutoff_gt_boxes": rare_cutoff,
+        "profiles": profile_configs,
+        "classes": {},
+        "profile_validation_summary": profile_summary_rows,
+    }
+
+    for cls_id, class_name in enumerate(CLASSES):
+        candidates = []
+        for profile_name, per_map in profile_per_class.items():
+            r = per_map.get(cls_id, {})
+            precision = float(r.get("precision", 0.0))
+            recall = float(r.get("recall", 0.0))
+            map50_95 = float(r.get("mAP50_95", 0.0))
+            gt_boxes = int(r.get("gt_boxes", gt_counts[cls_id] if cls_id < len(gt_counts) else 0))
+            missed_defect_penalty = 3.0 if gt_boxes <= rare_cutoff else 2.0
+            inspection_score = (1.0 - precision) + missed_defect_penalty * (1.0 - recall) + 0.50 * (1.0 - map50_95)
+            candidates.append({
+                "profile_name": profile_name,
+                "precision": precision,
+                "recall": recall,
+                "mAP50_95": map50_95,
+                "gt_boxes": gt_boxes,
+                "inspection_score": inspection_score,
+            })
+        candidates = sorted(candidates, key=lambda x: (x["inspection_score"], -x["mAP50_95"]))
+        chosen = candidates[0] if candidates else {"profile_name": "balanced", "precision": 0.0, "recall": 0.0, "mAP50_95": 0.0, "gt_boxes": 0, "inspection_score": 0.0}
+        gt_boxes = int(chosen.get("gt_boxes", 0))
+        rationale = "lowest validation inspection score"
+        if gt_boxes <= rare_cutoff and "high_recall" in profile_configs:
+            high_recall_candidate = next((c for c in candidates if c["profile_name"] == "high_recall"), None)
+            if high_recall_candidate and high_recall_candidate["recall"] >= chosen["recall"] - 0.03:
+                chosen = high_recall_candidate
+                rationale = "rare/weak class recall guard"
+        elif chosen["precision"] < 0.78 and "high_precision" in profile_configs:
+            high_precision_candidate = next((c for c in candidates if c["profile_name"] == "high_precision"), None)
+            if high_precision_candidate and high_precision_candidate["precision"] >= chosen["precision"]:
+                chosen = high_precision_candidate
+                rationale = "false-positive pressure guard"
+
+        cfg = profile_configs.get(chosen["profile_name"], profile_configs["balanced"])
+        class_threshold = float((cfg.get("per_class_conf") or {}).get(str(cls_id), cfg.get("conf", 0.15)))
+        row = {
+            "class_id": cls_id,
+            "class_name": class_name,
+            "selected_profile": chosen["profile_name"],
+            "selection_rationale": rationale,
+            "validation_precision": chosen["precision"],
+            "validation_recall": chosen["recall"],
+            "validation_mAP50_95": chosen["mAP50_95"],
+            "validation_gt_boxes": gt_boxes,
+            "class_conf_threshold": class_threshold,
+            "inspection_score": chosen["inspection_score"],
+        }
+        policy_rows.append(row)
+        policy["classes"][str(cls_id)] = row
+
+    policy_df = pd.DataFrame(policy_rows)
+    ADAPTIVE_POLICY_JSON.write_text(json.dumps(policy, indent=2, default=str))
+    policy_df.to_csv(ADAPTIVE_POLICY_CSV, index=False)
+    print(policy_df.to_string(index=False))
+    print("Saved:", ADAPTIVE_POLICY_JSON)
+    print("Saved:", ADAPTIVE_POLICY_CSV)
+    return policy, policy_df
+
+
+def adaptive_defect_aware_fuse_from_cache_item(item, policy):
+    profile_configs = policy["profiles"]
+    out = []
+    classes = sorted(set([b["cls"] for b in item["yolo"]] + [b["cls"] for b in item["rtdetr"]]))
+    for cls_id in classes:
+        y_cls = [b for b in item["yolo"] if int(b["cls"]) == int(cls_id)]
+        r_cls = [b for b in item["rtdetr"] if int(b["cls"]) == int(cls_id)]
+        class_policy = policy["classes"].get(str(int(cls_id)), {})
+        profile_name = class_policy.get("selected_profile", "balanced")
+        stats = best_agreement_stats(y_cls, r_cls)
+
+        if stats["agreement_iou"] < 0.25 and stats["confidence_gap"] > 0.35 and "high_precision" in profile_configs:
+            profile_name = "high_precision"
+        elif stats["agreement_iou"] >= 0.50 and stats["confidence_gap"] <= 0.25 and "balanced" in profile_configs:
+            profile_name = "balanced"
+
+        cfg = dict(profile_configs.get(profile_name, profile_configs.get("balanced", default_hybrid_config())))
+        per_class_conf = dict(cfg.get("per_class_conf") or {})
+        if "class_conf_threshold" in class_policy:
+            per_class_conf[str(int(cls_id))] = float(class_policy["class_conf_threshold"])
+        cfg["per_class_conf"] = per_class_conf
+        out.extend(fuse_class_boxes_config(y_cls, r_cls, cfg))
+    return nms_class_aware(out, iou_thr=0.55)
+
+
+def evaluate_adaptive_defect_aware_hybrid(policy):
+    test_paths, gt_test = build_gt_for_split("test")
+    min_conf = min(float(cfg.get("conf", 0.15)) for cfg in policy["profiles"].values())
+    cache = collect_hybrid_prediction_cache(test_paths, min_conf)
+    pred_by_class = {i: [] for i in range(len(CLASSES))}
+    preds_by_image = {}
+    for item in tqdm(cache, desc="Adaptive defect-aware fusion"):
+        image_path = item["image_path"]
+        preds = adaptive_defect_aware_fuse_from_cache_item(item, policy)
+        append_prediction_maps(pred_by_class, preds_by_image, image_path.name, preds)
+    per_cls = evaluate_predictions(gt_test, pred_by_class)
+    precision, recall, mAP50, mAP50_95, f1 = summarize_per_class_rows(per_cls)
+    tp, fp, fn = count_detection_errors_at_iou(gt_test, pred_by_class, iou_thr=0.50)
+    row = {
+        "model": "Adaptive defect-aware YOLO11s + RT-DETR-L",
+        "family": "Adaptive validation-calibrated CNN-Transformer fusion",
+        "split": "test",
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "mAP50": mAP50,
+        "mAP50_95": mAP50_95,
+        "tp_iou50": tp,
+        "fp_iou50": fp,
+        "fn_iou50": fn,
+        "fp_per_image": float(fp / max(len(test_paths), 1)),
+        "fn_per_image": float(fn / max(len(test_paths), 1)),
+        "images": len(test_paths),
+    }
+    adaptive_df = pd.DataFrame([row])
+    adaptive_per_class_df = pd.DataFrame([
+        {
+            "model": "Adaptive defect-aware YOLO11s + RT-DETR-L",
+            "split": "test",
+            **r,
+        }
+        for r in per_cls
+    ])
+    adaptive_df.to_csv(ADAPTIVE_TEST_CSV, index=False)
+    adaptive_per_class_df.to_csv(ADAPTIVE_PER_CLASS_CSV, index=False)
+    print(adaptive_df.to_string(index=False))
+    print(adaptive_per_class_df.to_string(index=False))
+    print("Saved:", ADAPTIVE_TEST_CSV)
+    print("Saved:", ADAPTIVE_PER_CLASS_CSV)
+    return row, adaptive_per_class_df, gt_test, pred_by_class, preds_by_image
+
+
+def evaluate_predictions_by_size(model_name, gt_by_class, pred_by_class, image_dims):
+    rows = []
+    for size_item in SIZE_BINS:
+        size_name = size_item["size_bin"]
+        target_gt = {i: {} for i in range(len(CLASSES))}
+        ignored_gt = {i: {} for i in range(len(CLASSES))}
+        for cls_id in range(len(CLASSES)):
+            for img_id, boxes in gt_by_class.get(cls_id, {}).items():
+                dims = image_dims.get(img_id)
+                if not dims:
+                    continue
+                for box in boxes:
+                    area_ratio = box_area_ratio(box, dims)
+                    bucket = assign_size_bin(area_ratio)
+                    dest = target_gt if bucket == size_name else ignored_gt
+                    dest.setdefault(cls_id, {}).setdefault(img_id, []).append(box)
+
+        class_rows = []
+        for cls_id in range(len(CLASSES)):
+            n_gt = sum(len(v) for v in target_gt.get(cls_id, {}).values())
+            cls_preds = sorted(pred_by_class.get(cls_id, []), key=lambda x: x["conf"], reverse=True)
+            aps = []
+            p50 = r50 = ap50 = 0.0
+            for thr in np.arange(0.5, 0.96, 0.05):
+                matched = {img_id: np.zeros(len(target_gt.get(cls_id, {}).get(img_id, [])), dtype=bool) for img_id in target_gt.get(cls_id, {})}
+                tps, fps = [], []
+                for pred in cls_preds:
+                    img_id = pred["image_id"]
+                    target_boxes = target_gt.get(cls_id, {}).get(img_id, [])
+                    ignore_boxes = ignored_gt.get(cls_id, {}).get(img_id, [])
+                    best_target_iou, best_target_idx = 0.0, -1
+                    for j, gt_box in enumerate(target_boxes):
+                        ov = iou_xyxy(pred["xyxy"], gt_box)
+                        if ov > best_target_iou:
+                            best_target_iou = ov
+                            best_target_idx = j
+                    best_ignore_iou = max([iou_xyxy(pred["xyxy"], b) for b in ignore_boxes], default=0.0)
+                    if best_target_iou >= thr and best_target_idx >= 0 and not matched.get(img_id, np.array([], dtype=bool))[best_target_idx]:
+                        matched[img_id][best_target_idx] = True
+                        tps.append(1.0)
+                        fps.append(0.0)
+                    elif best_ignore_iou >= thr:
+                        continue
+                    else:
+                        tps.append(0.0)
+                        fps.append(1.0)
+                if not tps:
+                    aps.append(0.0)
+                    continue
+                tps_arr = np.cumsum(np.array(tps))
+                fps_arr = np.cumsum(np.array(fps))
+                recalls = tps_arr / max(n_gt, 1)
+                precisions = tps_arr / np.maximum(tps_arr + fps_arr, 1e-9)
+                ap = ap_from_pr(recalls, precisions)
+                aps.append(ap)
+                if abs(float(thr) - 0.5) < 1e-9:
+                    ap50 = ap
+                    p50 = float(precisions[-1]) if len(precisions) else 0.0
+                    r50 = float(recalls[-1]) if len(recalls) else 0.0
+            class_rows.append({
+                "model": model_name,
+                "row_type": "class",
+                "size_bin": size_name,
+                "class_id": cls_id,
+                "class_name": CLASSES[cls_id],
+                "gt_boxes": n_gt,
+                "precision": p50,
+                "recall": r50,
+                "mAP50": ap50,
+                "mAP50_95": float(np.mean(aps)) if aps else 0.0,
+            })
+        rows.extend(class_rows)
+        non_empty = [r for r in class_rows if r["gt_boxes"] > 0]
+        rows.append({
+            "model": model_name,
+            "row_type": "macro",
+            "size_bin": size_name,
+            "class_id": -1,
+            "class_name": "ALL",
+            "gt_boxes": sum(r["gt_boxes"] for r in class_rows),
+            "precision": float(np.mean([r["precision"] for r in non_empty])) if non_empty else 0.0,
+            "recall": float(np.mean([r["recall"] for r in non_empty])) if non_empty else 0.0,
+            "mAP50": float(np.mean([r["mAP50"] for r in non_empty])) if non_empty else 0.0,
+            "mAP50_95": float(np.mean([r["mAP50_95"] for r in non_empty])) if non_empty else 0.0,
+        })
+    return rows
+
+
+def filtered_pred_by_conf(pred_by_class, min_conf):
+    return {
+        cls_id: [p for p in preds if float(p["conf"]) >= float(min_conf)]
+        for cls_id, preds in pred_by_class.items()
+    }
+
+
+def build_industrial_cost_table(model_maps, gt_by_class, image_count):
+    rows = []
+    for model_name, pred_by_class in model_maps.items():
+        for threshold in [0.05, 0.15, 0.25]:
+            thresholded = filtered_pred_by_conf(pred_by_class, threshold)
+            tp, fp, fn = count_detection_errors_at_iou(gt_by_class, thresholded, iou_thr=0.50)
+            fp_per_image = float(fp / max(image_count, 1))
+            fn_per_image = float(fn / max(image_count, 1))
+            for missed_penalty in [1, 2, 5, 10]:
+                rows.append({
+                    "model": model_name,
+                    "confidence_floor": threshold,
+                    "missed_defect_penalty": missed_penalty,
+                    "tp_iou50": tp,
+                    "fp_iou50": fp,
+                    "fn_iou50": fn,
+                    "fp_per_image": fp_per_image,
+                    "fn_per_image": fn_per_image,
+                    "inspection_burden": fp_per_image + missed_penalty * fn_per_image,
+                    "metric_definition": "FP/image + missed_defect_penalty * FN/image",
+                })
+    cost_df = pd.DataFrame(rows).sort_values(["missed_defect_penalty", "inspection_burden", "confidence_floor"])
+    cost_df.to_csv(INSPECTION_COST_CSV, index=False)
+    print(cost_df.to_string(index=False))
+    print("Saved:", INSPECTION_COST_CSV)
+    return cost_df
+
+
+def calibration_records_for_model(model_name, gt_by_class, pred_by_class):
+    records = []
+    for cls_id in range(len(CLASSES)):
+        gt_map = gt_by_class.get(cls_id, {})
+        matched = {img_id: np.zeros(len(gt_map.get(img_id, [])), dtype=bool) for img_id in gt_map}
+        cls_preds = sorted(pred_by_class.get(cls_id, []), key=lambda x: x["conf"], reverse=True)
+        for pred in cls_preds:
+            img_id = pred["image_id"]
+            gts = gt_map.get(img_id, [])
+            best_iou, best_idx = 0.0, -1
+            for j, gt_box in enumerate(gts):
+                ov = iou_xyxy(pred["xyxy"], gt_box)
+                if ov > best_iou:
+                    best_iou = ov
+                    best_idx = j
+            is_tp = int(best_iou >= 0.5 and best_idx >= 0 and not matched.get(img_id, np.array([], dtype=bool))[best_idx])
+            if is_tp:
+                matched[img_id][best_idx] = True
+            records.append({
+                "model": model_name,
+                "class_id": cls_id,
+                "class_name": CLASSES[cls_id],
+                "confidence": float(pred["conf"]),
+                "is_true_positive": is_tp,
+                "best_iou": float(best_iou),
+            })
+    return records
+
+
+def compute_calibration_tables(model_maps, gt_by_class, bins=10):
+    reliability_rows = []
+    metric_rows = []
+    bin_edges = np.linspace(0.0, 1.0, bins + 1)
+    for model_name, pred_by_class in model_maps.items():
+        records = calibration_records_for_model(model_name, gt_by_class, pred_by_class)
+        df = pd.DataFrame(records)
+        if df.empty:
+            continue
+        total = len(df)
+        ece = 0.0
+        brier = float(np.mean((df["confidence"].values - df["is_true_positive"].values) ** 2))
+        for i in range(bins):
+            lo, hi = float(bin_edges[i]), float(bin_edges[i + 1])
+            if i == bins - 1:
+                sub = df[(df["confidence"] >= lo) & (df["confidence"] <= hi)]
+            else:
+                sub = df[(df["confidence"] >= lo) & (df["confidence"] < hi)]
+            if sub.empty:
+                acc = conf = count = 0.0
+            else:
+                acc = float(sub["is_true_positive"].mean())
+                conf = float(sub["confidence"].mean())
+                count = int(len(sub))
+                ece += (count / max(total, 1)) * abs(acc - conf)
+            reliability_rows.append({
+                "model": model_name,
+                "bin_id": i,
+                "bin_low": lo,
+                "bin_high": hi,
+                "count": int(count),
+                "mean_confidence": conf,
+                "empirical_precision": acc,
+                "abs_gap": abs(acc - conf),
+            })
+        metric_rows.append({
+            "model": model_name,
+            "detections": total,
+            "ece": float(ece),
+            "brier_score": brier,
+            "mean_confidence": float(df["confidence"].mean()),
+            "empirical_precision": float(df["is_true_positive"].mean()),
+        })
+    metrics_df = pd.DataFrame(metric_rows).sort_values("ece")
+    reliability_df = pd.DataFrame(reliability_rows)
+    metrics_df.to_csv(CALIBRATION_METRICS_CSV, index=False)
+    reliability_df.to_csv(CALIBRATION_RELIABILITY_CSV, index=False)
+    print(metrics_df.to_string(index=False))
+    print(reliability_df.to_string(index=False))
+    print("Saved:", CALIBRATION_METRICS_CSV)
+    print("Saved:", CALIBRATION_RELIABILITY_CSV)
+    return metrics_df, reliability_df
+
+
+def plot_reliability_diagram(reliability_df):
+    if reliability_df.empty:
+        return
+    plt.figure(figsize=(7, 6))
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect calibration")
+    for model_name, sub in reliability_df.groupby("model"):
+        sub = sub[sub["count"] > 0].sort_values("mean_confidence")
+        if sub.empty:
+            continue
+        plt.plot(sub["mean_confidence"], sub["empirical_precision"], marker="o", label=model_name)
+    plt.xlabel("Mean confidence")
+    plt.ylabel("Empirical precision")
+    plt.title("Detection Reliability Diagram")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(CALIBRATION_RELIABILITY_PLOT, dpi=150)
+    plt.show()
+    print("Saved:", CALIBRATION_RELIABILITY_PLOT)
+
+
+publication_outputs = {}
+if RUN_PUBLICATION_ANALYSIS:
+    test_image_paths = sorted(TEST_IMG_DIR.glob("*.*"))
+    test_image_dims = image_dimensions_by_name(test_image_paths)
+    single_model_maps = collect_single_model_analysis_predictions(test_image_paths)
+
+    adaptive_policy, adaptive_policy_df = build_adaptive_defect_policy(selected_profile_configs_or_fallback())
+    adaptive_test_row, adaptive_per_class_df, adaptive_gt_by_class, adaptive_pred_by_class, adaptive_preds_by_image = evaluate_adaptive_defect_aware_hybrid(adaptive_policy)
+
+    model_pred_maps = {
+        "YOLO11s": single_model_maps["YOLO11s"][0],
+        "RT-DETR-L": single_model_maps["RT-DETR-L"][0],
+        "Hybrid balanced WBF": final_pred_by_class,
+        "Adaptive defect-aware hybrid": adaptive_pred_by_class,
+    }
+
+    size_rows = []
+    for model_name, pred_map in tqdm(model_pred_maps.items(), desc="Defect size analysis"):
+        size_rows.extend(evaluate_predictions_by_size(model_name, final_gt_by_class, pred_map, test_image_dims))
+    defect_size_df = pd.DataFrame(size_rows)
+    defect_size_df.to_csv(DEFECT_SIZE_ANALYSIS_CSV, index=False)
+    defect_size_df[defect_size_df["row_type"] == "macro"].to_csv(ADAPTIVE_SIZE_ANALYSIS_CSV, index=False)
+    print(defect_size_df.to_string(index=False))
+    print("Saved:", DEFECT_SIZE_ANALYSIS_CSV)
+    print("Saved:", ADAPTIVE_SIZE_ANALYSIS_CSV)
+
+    industrial_cost_df = build_industrial_cost_table(model_pred_maps, final_gt_by_class, len(test_image_paths))
+    calibration_metrics_df, calibration_reliability_df = compute_calibration_tables(model_pred_maps, final_gt_by_class, bins=10)
+    plot_reliability_diagram(calibration_reliability_df)
+
+    publication_outputs = {
+        "adaptive_test": adaptive_test_row,
+        "defect_size_rows": len(defect_size_df),
+        "industrial_cost_rows": len(industrial_cost_df),
+        "calibration_models": calibration_metrics_df["model"].tolist() if not calibration_metrics_df.empty else [],
+    }
+    print(json.dumps(publication_outputs, indent=2, default=str))
+else:
+    print("Publication analyses disabled.")
+"""
+    ),
+    markdown_cell(
+        """
 ## Task 13: Hybrid Pareto Frontier Plot
 """
     ),
@@ -3603,7 +4171,7 @@ else:
     code_cell(
         """
 traceability = pd.DataFrame([
-    ["Detect and localize six PCB defect classes", "YOLO dataset conversion, DsPCBSD+ overlap merge, YOLOv8 training, prediction gallery"],
+    ["Detect and localize six PCB defect classes", "YOLO dataset conversion, DsPCBSD+ overlap merge, YOLO11s training, prediction gallery"],
     ["Improve dataset realism and size", "Adds DsPCBSD+ real PCB images from Figshare DOI 10.6084/m9.figshare.24970329.v1 for overlapping classes"],
     ["Mitigate class imbalance with synthetic augmentation", "Generates copy-paste synthetic defect images for weak/rare classes as a practical TransGAN-style class-balancing surrogate; summary saved to synthetic_augmentation_summary.csv"],
     ["Improve small-defect robustness", "Mosaic/MixUp/copy-paste, perspective, HSV, synthetic defect augmentation, multi-scale-ready YOLO training, plus Albumentations robustness tests; mild synthetic Gaussian noise in robustness evaluation and documented training-noise limitation"],
@@ -3616,6 +4184,10 @@ traceability = pd.DataFrame([
     ["Implement Hybrid YOLO-Transformer detection", "YOLO11s proposal detector + RT-DETR-L transformer-style validation/refinement with tuned late-fusion evaluation."],
     ["Tune hybrid model using validation only", "hybrid_tuning_grid.csv and hybrid_tuning_grid_v2.csv sweep confidence, fusion IoU, fusion mode, single-model fallback confidence, per-class thresholds, class-aware NMS, and class-weighted fusion; hybrid_selected_config.json and hybrid_selected_config_v2.json store the validation-selected F0.5/precision-floor config; hybrid_selected_test_metrics_v2.csv evaluates that config on test; v11 adds hybrid_pareto_frontier.csv, hybrid_selected_profiles_config.json, and hybrid_selected_profiles_test_metrics.csv (three validation profiles + Pareto frontier, v10 paths unchanged)"],
     ["Analyze hybrid errors", "hybrid_error_analysis.csv, hybrid_error_examples.csv, and hybrid_class_delta.csv summarize false positives, missed defects, and class-level gains/failures"],
+    ["Analyze tiny/small defect behavior", "defect_size_analysis.csv reports precision, recall, mAP50, and mAP50-95 for tiny, small, medium, and large defects"],
+    ["Strengthen adaptive hybrid claim", "adaptive_defect_aware_policy.json and adaptive_defect_aware_hybrid_test_metrics.csv implement validation-calibrated class-wise fusion"],
+    ["Connect results to inspection cost", "industrial_inspection_cost_metrics.csv reports FP/image + missed_defect_penalty * FN/image"],
+    ["Evaluate confidence reliability", "calibration_metrics.csv, calibration_reliability_bins.csv, and calibration_reliability_plot.png report ECE and reliability curves"],
     ["Implement custom feature-level CNN-Transformer model", "Trains a custom CNN-Transformer patch refiner on defect/background crops and evaluates refined hybrid predictions in cnn_transformer_refined_hybrid_metrics.csv"],
     ["Provide interpretable visual output", "Ground-truth vs YOLO vs RT-DETR vs tuned hybrid comparison panels saved under hybrid_visual_evidence plus standard prediction gallery"],
 ])
@@ -3632,74 +4204,116 @@ traceability.to_csv(WORK_DIR / "requirements_traceability.csv", index=False)
     code_cell(
         """
 def _actual_yolo11s_test_metrics():
-    df = pd.read_csv(SUMMARY_CSV) if SUMMARY_CSV.exists() else pd.DataFrame()
-    if not df.empty and "split" in df.columns:
-        test_rows = df[df["split"] == "test"]
-        if not test_rows.empty:
-            row = test_rows.iloc[0]
-            return {
+    df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
+    if not df.empty:
+        rows = df[(df["model"] == "YOLO11s") & (df["split"] == "test")]
+        if not rows.empty:
+            row = rows.iloc[0]
+            return {k: float(row.get(k, np.nan)) for k in ["precision", "recall", "mAP50", "mAP50_95"]}
+    return {"precision": np.nan, "recall": np.nan, "mAP50": np.nan, "mAP50_95": np.nan}
+
+
+def _architecture_test_metrics(model_name):
+    df = pd.read_csv(ARCHITECTURE_CSV) if ARCHITECTURE_CSV.exists() else pd.DataFrame()
+    if df.empty:
+        return None
+    rows = df[(df["model"] == model_name) & (df["split"] == "test")]
+    if rows.empty:
+        return None
+    row = rows.iloc[0]
+    return {
+        "precision": float(row.get("precision", np.nan)),
+        "recall": float(row.get("recall", np.nan)),
+        "mAP50": float(row.get("mAP50", np.nan)),
+        "mAP50_95": float(row.get("mAP50_95", np.nan)),
+        "fp_per_image": row.get("false_positives_per_image", "—"),
+    }
+
+
+def _summary_row(model_name, metrics, notes, source_artifact):
+    metrics = metrics or {"precision": np.nan, "recall": np.nan, "mAP50": np.nan, "mAP50_95": np.nan, "fp_per_image": "—"}
+    return {
+        "model": model_name,
+        "precision": metrics.get("precision", np.nan),
+        "recall": metrics.get("recall", np.nan),
+        "mAP50": metrics.get("mAP50", np.nan),
+        "mAP50_95": metrics.get("mAP50_95", np.nan),
+        "fp_per_image": metrics.get("fp_per_image", "—"),
+        "notes": notes,
+        "source_artifact": source_artifact,
+    }
+
+
+summary_rows = [
+    _summary_row("YOLO11s baseline", _architecture_test_metrics("YOLO11s"), "CNN baseline trained in this run", str(ARCHITECTURE_CSV.name)),
+    _summary_row("RT-DETR-L", _architecture_test_metrics("RT-DETR-L"), "Transformer-style detector trained in this run", str(ARCHITECTURE_CSV.name)),
+]
+
+if HYBRID_SELECTED_PROFILES_TEST_CSV.exists():
+    profiles_df = pd.read_csv(HYBRID_SELECTED_PROFILES_TEST_CSV)
+    for _, row in profiles_df.iterrows():
+        profile_name = str(row.get("profile_name", "profile"))
+        metrics = {
+            "precision": float(row.get("test_precision", np.nan)),
+            "recall": float(row.get("test_recall", np.nan)),
+            "mAP50": float(row.get("test_mAP50", np.nan)),
+            "mAP50_95": float(row.get("test_mAP50_95", np.nan)),
+            "fp_per_image": float(row.get("test_false_positives_per_image", np.nan)),
+        }
+        summary_rows.append(_summary_row(
+            f"Hybrid profile - {profile_name}",
+            metrics,
+            str(row.get("selection_rule", "Validation-selected hybrid operating point")),
+            str(HYBRID_SELECTED_PROFILES_TEST_CSV.name),
+        ))
+
+if "final_test_row" in globals():
+    summary_rows.append(_summary_row(
+        "Hybrid balanced WBF",
+        {
+            "precision": final_test_row.get("precision", np.nan),
+            "recall": final_test_row.get("recall", np.nan),
+            "mAP50": final_test_row.get("mAP50", np.nan),
+            "mAP50_95": final_test_row.get("mAP50_95", np.nan),
+            "fp_per_image": final_test_row.get("fp_per_image", np.nan),
+        },
+        "Final WBF profile; strongest recall/mAP tradeoff, higher FP burden",
+        str(HYBRID_FINAL_BALANCED_TEST_CSV.name),
+    ))
+
+if "adaptive_test_row" in globals():
+    summary_rows.append(_summary_row(
+        "Adaptive defect-aware hybrid",
+        {
+            "precision": adaptive_test_row.get("precision", np.nan),
+            "recall": adaptive_test_row.get("recall", np.nan),
+            "mAP50": adaptive_test_row.get("mAP50", np.nan),
+            "mAP50_95": adaptive_test_row.get("mAP50_95", np.nan),
+            "fp_per_image": adaptive_test_row.get("fp_per_image", np.nan),
+        },
+        "Validation-calibrated class-wise adaptive YOLO-Transformer fusion",
+        str(ADAPTIVE_TEST_CSV.name),
+    ))
+
+if REFINER_METRICS_CSV.exists():
+    refiner_df = pd.read_csv(REFINER_METRICS_CSV)
+    refiner_test = refiner_df[refiner_df["split"] == "test"] if "split" in refiner_df.columns else pd.DataFrame()
+    if not refiner_test.empty:
+        row = refiner_test.iloc[0]
+        summary_rows.append(_summary_row(
+            "CNN-Transformer refiner",
+            {
                 "precision": float(row.get("precision", np.nan)),
                 "recall": float(row.get("recall", np.nan)),
                 "mAP50": float(row.get("mAP50", np.nan)),
                 "mAP50_95": float(row.get("mAP50_95", np.nan)),
-            }
-    return {"precision": np.nan, "recall": np.nan, "mAP50": np.nan, "mAP50_95": np.nan}
+                "fp_per_image": "—",
+            },
+            "Experimental feature-level refiner; reported as underperforming extension",
+            str(REFINER_METRICS_CSV.name),
+        ))
 
-
-yolo_actual = _actual_yolo11s_test_metrics()
-final_results_summary_df = pd.DataFrame([
-    {
-        "model": "YOLO11s baseline",
-        **yolo_actual,
-        "fp_per_image": "—",
-        "notes": "CNN baseline",
-    },
-    {
-        "model": "RT-DETR-L",
-        "precision": 0.8706,
-        "recall": 0.8463,
-        "mAP50": 0.8765,
-        "mAP50_95": 0.4776,
-        "fp_per_image": "—",
-        "notes": "Best single-model mAP50-95",
-    },
-    {
-        "model": "Hybrid – high_recall",
-        "precision": 0.596,
-        "recall": 0.939,
-        "mAP50": 0.887,
-        "mAP50_95": 0.485,
-        "fp_per_image": 1.865,
-        "notes": "Best recall, too many FP",
-    },
-    {
-        "model": "Hybrid – balanced ✅",
-        "precision": 0.848,
-        "recall": 0.863,
-        "mAP50": 0.830,
-        "mAP50_95": 0.461,
-        "fp_per_image": 0.416,
-        "notes": "FINAL SELECTED MODEL",
-    },
-    {
-        "model": "Hybrid – high_precision",
-        "precision": 0.898,
-        "recall": 0.837,
-        "mAP50": 0.801,
-        "mAP50_95": 0.443,
-        "fp_per_image": 0.230,
-        "notes": "Cleanest, lower recall",
-    },
-    {
-        "model": "CNN-Transformer refiner",
-        "precision": 0.900,
-        "recall": 0.431,
-        "mAP50": 0.412,
-        "mAP50_95": 0.225,
-        "fp_per_image": "—",
-        "notes": "Experimental — underperforms",
-    },
-])
+final_results_summary_df = pd.DataFrame(summary_rows)
 final_results_summary_df.to_csv(FINAL_SUMMARY_CSV, index=False)
 print(final_results_summary_df.to_string(index=False))
 print("Saved:", FINAL_SUMMARY_CSV)
@@ -3760,6 +4374,30 @@ requirements_traceability_df = pd.DataFrame([
         "method": "Target-side build required",
         "result": "Prepared not built",
         "status": "PARTIAL",
+    },
+    {
+        "requirement": "Tiny/small defect performance",
+        "method": "Defect size analysis",
+        "result": "AP/recall by tiny, small, medium, large bins",
+        "status": "MET",
+    },
+    {
+        "requirement": "Adaptive hybrid fusion novelty",
+        "method": "Validation-calibrated class-wise policy",
+        "result": "Adaptive profile selected per class using uncertainty/agreement",
+        "status": "MET",
+    },
+    {
+        "requirement": "Industrial inspection usefulness",
+        "method": "FP/FN inspection burden metric",
+        "result": "FP/image + missed-defect penalty * FN/image",
+        "status": "MET",
+    },
+    {
+        "requirement": "Trustworthy deployment confidence",
+        "method": "Calibration/reliability analysis",
+        "result": "ECE, Brier score, reliability bins and plot",
+        "status": "MET",
     },
     {
         "requirement": "CNN-Transformer extension",

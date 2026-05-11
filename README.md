@@ -7,7 +7,8 @@ This project implements an end-to-end PCB defect detection workflow aligned with
 - Detect six PCB defect classes: mouse bite, spur, open circuit, short, missing hole, and spurious copper.
 - Train a deep learning detector using GPU acceleration.
 - Evaluate precision, recall, mAP50, mAP50-95, and inference latency.
-- Benchmark a transformer-style RT-DETR detector against the YOLOv8 CNN baseline.
+- Benchmark a transformer-style RT-DETR detector against the YOLO11s CNN baseline.
+- Add publication-oriented analyses: defect size performance, adaptive defect-aware hybrid fusion, industrial FP/FN inspection burden, and calibration/reliability.
 - Add synthetic defect augmentation for rare/weak classes as a practical TransGAN-style class-balancing surrogate.
 - Evaluate a custom CNN-Transformer feature refiner on top of the hybrid detector.
 - Test robustness with Albumentations image transformations.
@@ -55,7 +56,7 @@ Local dataset downloads are intentionally ignored by git because they are large.
 After a successful Kaggle run, the important generated files are expected in `/kaggle/working`:
 
 - `project_metrics_summary.csv`
-- `architecture_comparison.csv` (YOLOv8n and RT-DETR-L, val and test rows when RT-DETR benchmark runs)
+- `architecture_comparison.csv` (YOLO11s and RT-DETR-L, val and test rows when RT-DETR benchmark runs)
 - `synthetic_augmentation_summary.csv` (generated synthetic defect counts by class)
 - `hybrid_tuning_grid.csv` (validation-only sweep over confidence, fusion IoU, fusion mode, and class-aware NMS)
 - `hybrid_tuning_grid_v2.csv` (stricter validation-only sweep with F0.5, false-positive rate, single-model fallback confidence, per-class thresholds, and class-weighted fusion)
@@ -67,7 +68,7 @@ After a successful Kaggle run, the important generated files are expected in `/k
 - `hybrid_selected_test_metrics.csv` (test metrics for the selected validation-tuned hybrid)
 - `hybrid_selected_test_metrics_v2.csv` (test metrics for the selected precision-focused hybrid)
 - `hybrid_selected_per_class_metrics.csv` (per-class test metrics for the selected validation-tuned hybrid)
-- `hybrid_fusion_metrics.csv` (Hybrid YOLOv8n + RT-DETR-L late-fusion val/test metrics)
+- `hybrid_fusion_metrics.csv` (Hybrid YOLO11s + RT-DETR-L late-fusion val/test metrics)
 - `hybrid_per_class_metrics.csv` (hybrid per-class precision/recall/mAP)
 - `hybrid_robustness_metrics.csv` (selected hybrid robustness under clean, lighting, noise, blur, and rotation conditions)
 - `hybrid_robustness_per_class_metrics.csv` (hybrid robustness broken down by class)
@@ -75,9 +76,15 @@ After a successful Kaggle run, the important generated files are expected in `/k
 - `cnn_transformer_refiner_training.csv` (custom CNN-Transformer feature refiner training history)
 - `cnn_transformer_refined_hybrid_metrics.csv` (refined hybrid val/test metrics)
 - `cnn_transformer_refined_hybrid_per_class.csv` (refined hybrid per-class metrics)
+- `hybrid_final_balanced_test_metrics.csv` and `hybrid_final_balanced_per_class_metrics.csv`
+- `defect_size_analysis.csv` (tiny/small/medium/large defect metrics)
+- `adaptive_defect_aware_policy.json` and `adaptive_defect_aware_policy.csv`
+- `adaptive_defect_aware_hybrid_test_metrics.csv` and `adaptive_defect_aware_hybrid_per_class_metrics.csv`
+- `industrial_inspection_cost_metrics.csv` (FP/image + missed-defect penalty * FN/image)
+- `calibration_metrics.csv`, `calibration_reliability_bins.csv`, and `calibration_reliability_plot.png`
 - `robustness_metrics.csv`
 - `per_class_metrics.csv`
-- `latency_summary.json` (keys `yolov8n`, `rtdetr_l`, `hybrid_yolo_rtdetr_fusion`, and `cnn_transformer_refined_hybrid` when the corresponding phases run)
+- `latency_summary.json` (keys `yolo11s`, `rtdetr_l`, `hybrid_yolo_rtdetr_fusion`, and `cnn_transformer_refined_hybrid` when the corresponding phases run)
 - `latency_comparison.csv`
 - `final_results_summary.csv`
 - `deployment_exports.json`
@@ -87,14 +94,12 @@ After a successful Kaggle run, the important generated files are expected in `/k
 
 ## Current Benchmark Notes
 
-- The implemented system uses `YOLOv8n` as a CNN real-time baseline and `RT-DETR-L` as a transformer-style benchmark to evaluate CNN-vs-transformer tradeoffs.
-- The notebook also includes a tuned **Hybrid YOLO-Transformer late-fusion pipeline** (decision-level fusion), combining YOLO and RT-DETR predictions class-wise with validation-selected confidence, IoU, fusion mode, and class-aware NMS settings.
-- The latest tuning path adds a stricter precision-focused hybrid sweep using F0.5, false positives per image, single-model high-confidence fallback, per-class confidence thresholds, and class-weighted YOLO/RT-DETR fusion.
-- Synthetic copy-paste defect augmentation and the custom CNN-Transformer patch refiner are implemented to support the survey-paper discussion around augmentation and feature-level CNN-Transformer modeling. The refiner is treated as an experimental extension unless its metrics beat the tuned late-fusion hybrid.
+- The implemented system uses `YOLO11s` as the CNN baseline and `RT-DETR-L` as the transformer-style benchmark.
+- The notebook includes tuned **Hybrid YOLO-Transformer late-fusion** profiles plus a final WBF-based balanced hybrid.
+- The latest completed benchmark run produced: YOLO11s test mAP50-95 `0.4996`, RT-DETR-L test mAP50-95 `0.4901`, agreement-only hybrid precision `0.9074` with `0.216` FP/image, and final balanced WBF hybrid recall `0.9370` with mAP50-95 `0.5077`.
+- The final publication-analysis path adds adaptive defect-aware fusion, defect-size metrics, inspection-burden metrics, and confidence calibration outputs.
+- Synthetic copy-paste defect augmentation and the custom CNN-Transformer patch refiner are implemented to support the survey-paper discussion around augmentation and feature-level CNN-Transformer modeling. The refiner is treated as an experimental extension because it underperforms the detector-level hybrid.
 - TensorRT export is documented as a Jetson-target deployment step because TensorRT engines are hardware/runtime specific; ONNX export is completed in Kaggle.
-- In the latest completed benchmark run, the tuned late-fusion hybrid reached test precision 0.625, recall 0.928, mAP50 0.883, and mAP50-95 0.480. The new precision-focused sweep is intended to reduce false positives while preserving as much hybrid recall/mAP as possible.
-- RT-DETR-L remains the stronger high-precision reference model, so final reporting should compare tuned hybrid recall/mAP gains against RT-DETR precision and latency.
-- Gaussian noise remains the weakest robustness condition and is currently treated as a known limitation for future training-time augmentation improvements.
 
 ## Security Note
 
