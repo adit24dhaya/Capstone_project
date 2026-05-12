@@ -143,16 +143,17 @@ from ultralytics import YOLO
 os.environ.setdefault("WANDB_MODE", "disabled")
 
 SEED = 42
+EXPERIMENT_TAG = "v17_yolo11s_80e_accuracy_tune"
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
-EPOCHS = 50
+EPOCHS = 80
 IMG_SIZE = 1280
 BATCH = 12
-RUN_RTDETR_BENCHMARK = True
+RUN_RTDETR_BENCHMARK = False
 RTDETR_EPOCHS = 10
 RTDETR_BATCH = 4
 RTDETR_IMG_SIZE = 640
-RUN_ROBUSTNESS_TESTS = True
+RUN_ROBUSTNESS_TESTS = False
 ROBUSTNESS_SAMPLE_SIZE = 150
 RUN_TENSORRT_EXPORT = False
 USE_DSPCBSD_PLUS = True
@@ -164,11 +165,11 @@ SYNTHETIC_TARGETS_PER_CLASS = {
     "Spur": 240,
 }
 SYNTHETIC_PATCH_CONTEXT_RANGE = (1.4, 2.4)
-RUN_HYBRID_FUSION = True
+RUN_HYBRID_FUSION = False
 HYBRID_CONF = 0.01
 HYBRID_FUSION_IOU = 0.55
 HYBRID_EVAL_SAMPLE_SIZE = None
-RUN_HYBRID_TUNING = True
+RUN_HYBRID_TUNING = False
 HYBRID_TUNING_CONF_VALUES = [0.15, 0.25, 0.30]
 HYBRID_TUNING_IOU_VALUES = [0.40, 0.45, 0.55]
 HYBRID_TUNING_MODES = ["agreement_only", "weighted_fusion", "single_high_conf_fallback", "class_weighted_fusion"]
@@ -182,6 +183,8 @@ HYBRID_MIN_MAP50_FOR_SELECTION = 0.82
 HYBRID_TUNING_SAMPLE_SIZE = 250
 HYBRID_VISUAL_SAMPLE_SIZE = 12
 FINAL_PROFILE_NAME = "balanced"
+RUN_FINAL_BALANCED_EVAL = False
+RUN_VISUAL_GALLERY = False
 RUN_CNN_TRANSFORMER_REFINER = False
 REFINER_EPOCHS = 5
 REFINER_BATCH = 64
@@ -190,8 +193,15 @@ REFINER_MAX_POSITIVE_PER_CLASS = 650
 REFINER_NEGATIVE_SAMPLES = 1600
 REFINER_KEEP_PROB = 0.45
 REFINER_CANDIDATE_CONF = 0.03
-RUN_PUBLICATION_ANALYSIS = True
+RUN_PUBLICATION_ANALYSIS = False
 ANALYSIS_SINGLE_MODEL_CONF = 0.05
+V16_YOLO11S_REFERENCE = {
+    "experiment_tag": "v16_final_full_analysis",
+    "precision": 0.8908843529738135,
+    "recall": 0.8611181145255921,
+    "mAP50": 0.9054445661650888,
+    "mAP50_95": 0.5068167219178348,
+}
 
 DSPCBSD_PLUS_URL = "https://ndownloader.figshare.com/files/44069552"
 DSPCBSD_PLUS_MD5 = "508334b65bdaea7336f4c1b5d5a80a81"
@@ -251,6 +261,7 @@ ROBUSTNESS_ROOT = CACHE_DIR / "robustness_eval"
 PER_CLASS_CSV = WORK_DIR / "per_class_metrics.csv"
 LATENCY_TABLE_CSV = WORK_DIR / "latency_comparison.csv"
 FINAL_SUMMARY_CSV = WORK_DIR / "final_results_summary.csv"
+ACCURACY_TUNING_COMPARISON_CSV = WORK_DIR / "accuracy_tuning_comparison.csv"
 HYBRID_FUSION_CSV = WORK_DIR / "hybrid_fusion_metrics.csv"
 HYBRID_PER_CLASS_CSV = WORK_DIR / "hybrid_per_class_metrics.csv"
 HYBRID_TUNING_GRID_CSV = WORK_DIR / "hybrid_tuning_grid.csv"
@@ -302,6 +313,17 @@ if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
 else:
     raise RuntimeError("No Kaggle GPU is active. In Kaggle, open Settings and set Accelerator to GPU.")
+
+print("Experiment tag:", EXPERIMENT_TAG)
+print("YOLO training config:", {
+    "model": "yolo11s.pt",
+    "epochs": EPOCHS,
+    "imgsz": IMG_SIZE,
+    "batch": BATCH,
+    "rt_detr_enabled": RUN_RTDETR_BENCHMARK,
+    "hybrid_enabled": RUN_HYBRID_FUSION,
+    "publication_analysis_enabled": RUN_PUBLICATION_ANALYSIS,
+})
 """
     ),
     code_cell(
@@ -814,8 +836,9 @@ train_results = model.train(
     warmup_epochs=5,
     lr0=0.01,
     lrf=0.001,
-    patience=10,
+    patience=25,
     augment=True,
+    close_mosaic=15,
     label_smoothing=0.1,
     seed=SEED,
 )
@@ -2537,24 +2560,29 @@ def evaluate_final_balanced_paths(image_paths, label_dir, cfg, split_name):
 
 
 test_image_paths = sorted(TEST_IMG_DIR.glob("*.*"))
-final_test_row, final_per_class_df, final_gt_by_class, final_pred_by_class, final_preds_by_image = evaluate_final_balanced_paths(
-    test_image_paths,
-    TEST_LBL_DIR,
-    final_cfg,
-    "test",
-)
-final_test_df = pd.DataFrame([final_test_row])
-final_test_df.to_csv(HYBRID_FINAL_BALANCED_TEST_CSV, index=False)
-final_per_class_df.to_csv(HYBRID_FINAL_BALANCED_PER_CLASS_CSV, index=False)
-print(final_test_df.to_string(index=False))
-print(final_per_class_df.to_string(index=False))
-print("=" * 72)
-print("FINAL BALANCED TEST SUMMARY")
-for key in ["precision", "recall", "mAP50", "mAP50_95", "fp_per_image"]:
-    print(f"{key}: {final_test_row.get(key)}")
-print("=" * 72)
-print("Saved:", HYBRID_FINAL_BALANCED_TEST_CSV)
-print("Saved:", HYBRID_FINAL_BALANCED_PER_CLASS_CSV)
+if RUN_FINAL_BALANCED_EVAL:
+    final_test_row, final_per_class_df, final_gt_by_class, final_pred_by_class, final_preds_by_image = evaluate_final_balanced_paths(
+        test_image_paths,
+        TEST_LBL_DIR,
+        final_cfg,
+        "test",
+    )
+    final_test_df = pd.DataFrame([final_test_row])
+    final_test_df.to_csv(HYBRID_FINAL_BALANCED_TEST_CSV, index=False)
+    final_per_class_df.to_csv(HYBRID_FINAL_BALANCED_PER_CLASS_CSV, index=False)
+    print(final_test_df.to_string(index=False))
+    print(final_per_class_df.to_string(index=False))
+    print("=" * 72)
+    print("FINAL BALANCED TEST SUMMARY")
+    for key in ["precision", "recall", "mAP50", "mAP50_95", "fp_per_image"]:
+        print(f"{key}: {final_test_row.get(key)}")
+    print("=" * 72)
+    print("Saved:", HYBRID_FINAL_BALANCED_TEST_CSV)
+    print("Saved:", HYBRID_FINAL_BALANCED_PER_CLASS_CSV)
+else:
+    print("Final balanced hybrid evaluation disabled for this accuracy-tuning run.")
+    final_test_row = {}
+    final_per_class_df = pd.DataFrame()
 """
     ),
     markdown_cell(
@@ -2564,8 +2592,11 @@ print("Saved:", HYBRID_FINAL_BALANCED_PER_CLASS_CSV)
     ),
     code_cell(
         """
-balanced_per_class_check_df = pd.read_csv(HYBRID_FINAL_BALANCED_PER_CLASS_CSV)
-print(balanced_per_class_check_df.to_string(index=False))
+if HYBRID_FINAL_BALANCED_PER_CLASS_CSV.exists():
+    balanced_per_class_check_df = pd.read_csv(HYBRID_FINAL_BALANCED_PER_CLASS_CSV)
+    print(balanced_per_class_check_df.to_string(index=False))
+else:
+    print("Balanced per-class CSV not generated in this accuracy-tuning run.")
 """
     ),
     markdown_cell(
@@ -2757,7 +2788,12 @@ def analyze_final_balanced_errors(gt_by_class, preds_by_image):
     return summary_df, examples_df
 
 
-final_balanced_error_df, final_balanced_error_examples_df = analyze_final_balanced_errors(final_gt_by_class, final_preds_by_image)
+if RUN_FINAL_BALANCED_EVAL and "final_gt_by_class" in globals() and "final_preds_by_image" in globals():
+    final_balanced_error_df, final_balanced_error_examples_df = analyze_final_balanced_errors(final_gt_by_class, final_preds_by_image)
+else:
+    print("Balanced hybrid error analysis skipped for this accuracy-tuning run.")
+    final_balanced_error_df = pd.DataFrame()
+    final_balanced_error_examples_df = pd.DataFrame()
 """
     ),
     markdown_cell(
@@ -2826,7 +2862,11 @@ def save_final_balanced_visual_evidence(cfg):
     return saved
 
 
-final_balanced_visual_paths = save_final_balanced_visual_evidence(final_cfg)
+if RUN_FINAL_BALANCED_EVAL:
+    final_balanced_visual_paths = save_final_balanced_visual_evidence(final_cfg)
+else:
+    print("Balanced hybrid visual evidence skipped for this accuracy-tuning run.")
+    final_balanced_visual_paths = []
 """
     ),
     markdown_cell(
@@ -3407,31 +3447,34 @@ def build_profile_plot_df():
     ])
 
 
-profile_plot_df = build_profile_plot_df()
-plt.figure(figsize=(7, 5))
-styles = {
-    "high_recall": {"color": "orange", "marker": "o", "s": 90},
-    "balanced": {"color": "green", "marker": "*", "s": 220},
-    "high_precision": {"color": "blue", "marker": "o", "s": 90},
-}
-for _, row in profile_plot_df.iterrows():
-    style = styles.get(row["profile_name"], {"color": "gray", "marker": "o", "s": 80})
-    plt.scatter(row["recall"], row["precision"], label=row["profile_name"], **style)
-    plt.annotate(
-        f"{row['profile_name']}\\nFP/img={row['fp_per_image']:.3f}",
-        (row["recall"], row["precision"]),
-        textcoords="offset points",
-        xytext=(8, 8),
-    )
-plt.xlabel("Recall")
-plt.ylabel("Precision")
-plt.title("Hybrid Pareto Profile Comparison")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
-plt.savefig(HYBRID_PARETO_PROFILE_PLOT, dpi=150)
-plt.show()
-print("Saved:", HYBRID_PARETO_PROFILE_PLOT)
+if RUN_HYBRID_FUSION:
+    profile_plot_df = build_profile_plot_df()
+    plt.figure(figsize=(7, 5))
+    styles = {
+        "high_recall": {"color": "orange", "marker": "o", "s": 90},
+        "balanced": {"color": "green", "marker": "*", "s": 220},
+        "high_precision": {"color": "blue", "marker": "o", "s": 90},
+    }
+    for _, row in profile_plot_df.iterrows():
+        style = styles.get(row["profile_name"], {"color": "gray", "marker": "o", "s": 80})
+        plt.scatter(row["recall"], row["precision"], label=row["profile_name"], **style)
+        plt.annotate(
+            f"{row['profile_name']}\\nFP/img={row['fp_per_image']:.3f}",
+            (row["recall"], row["precision"]),
+            textcoords="offset points",
+            xytext=(8, 8),
+        )
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Hybrid Pareto Profile Comparison")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(HYBRID_PARETO_PROFILE_PLOT, dpi=150)
+    plt.show()
+    print("Saved:", HYBRID_PARETO_PROFILE_PLOT)
+else:
+    print("Hybrid Pareto plot skipped for this accuracy-tuning run.")
 """
     ),
     markdown_cell(
@@ -3935,8 +3978,11 @@ def show_side_by_side(img_path: Path, conf=0.01, iou=0.7):
 
 val_imgs = sorted(VAL_IMG_DIR.glob("*.*"))
 print("Validation images:", len(val_imgs))
-for p in random.sample(val_imgs, min(8, len(val_imgs))):
-    show_side_by_side(p, conf=0.01, iou=0.7)
+if RUN_VISUAL_GALLERY:
+    for p in random.sample(val_imgs, min(8, len(val_imgs))):
+        show_side_by_side(p, conf=0.01, iou=0.7)
+else:
+    print("Side-by-side visual checks disabled for this accuracy-tuning run.")
 """
     ),
     code_cell(
@@ -3950,10 +3996,12 @@ def count_preds_on_subset(conf, n=50):
     return total
 
 
-if val_imgs:
+if RUN_VISUAL_GALLERY and val_imgs:
     print("Pred count on validation subset at different confidence thresholds:")
     for conf in [0.25, 0.10, 0.05, 0.01, 0.005, 0.001]:
         print(f"  conf={conf:<6} -> total preds: {count_preds_on_subset(conf, n=50)}")
+else:
+    print("Confidence sweep visual check disabled for this accuracy-tuning run.")
 """
     ),
     code_cell(
@@ -4129,25 +4177,28 @@ print("Saved Jetson/TensorRT deployment status:", JETSON_DEPLOYMENT_STATUS_JSON)
     ),
     code_cell(
         """
-PRED_SAVE_DIR.mkdir(parents=True, exist_ok=True)
-gallery_sources = [str(p) for p in sorted(VAL_IMG_DIR.glob("*.*"))[:36]]
-predict_results = model.predict(
-    source=gallery_sources,
-    conf=0.01,
-    iou=0.7,
-    imgsz=IMG_SIZE,
-    save=True,
-    project=str(WORK_DIR / "vis_predictions"),
-    name="val_preds",
-    exist_ok=True,
-    verbose=False,
-)
-print("Saved prediction images to:", PRED_SAVE_DIR)
+if RUN_VISUAL_GALLERY:
+    PRED_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    gallery_sources = [str(p) for p in sorted(VAL_IMG_DIR.glob("*.*"))[:36]]
+    predict_results = model.predict(
+        source=gallery_sources,
+        conf=0.01,
+        iou=0.7,
+        imgsz=IMG_SIZE,
+        save=True,
+        project=str(WORK_DIR / "vis_predictions"),
+        name="val_preds",
+        exist_ok=True,
+        verbose=False,
+    )
+    print("Saved prediction images to:", PRED_SAVE_DIR)
+else:
+    print("Prediction gallery disabled for this accuracy-tuning run.")
 """
     ),
     code_cell(
         """
-imgs = sorted(PRED_SAVE_DIR.glob("*.jpg"))[:36]
+imgs = sorted(PRED_SAVE_DIR.glob("*.jpg"))[:36] if RUN_VISUAL_GALLERY else []
 if not imgs:
     print("No .jpg files found in:", PRED_SAVE_DIR)
 else:
@@ -4247,8 +4298,13 @@ def _summary_row(model_name, metrics, notes, source_artifact):
 
 summary_rows = [
     _summary_row("YOLO11s baseline", _architecture_test_metrics("YOLO11s"), "CNN baseline trained in this run", str(ARCHITECTURE_CSV.name)),
-    _summary_row("RT-DETR-L", _architecture_test_metrics("RT-DETR-L"), "Transformer-style detector trained in this run", str(ARCHITECTURE_CSV.name)),
 ]
+
+rtdetr_test_metrics = _architecture_test_metrics("RT-DETR-L")
+if rtdetr_test_metrics:
+    summary_rows.append(_summary_row("RT-DETR-L", rtdetr_test_metrics, "Transformer-style detector trained in this run", str(ARCHITECTURE_CSV.name)))
+else:
+    print("RT-DETR-L summary row skipped because RT-DETR is disabled or unavailable in this run.")
 
 if HYBRID_SELECTED_PROFILES_TEST_CSV.exists():
     profiles_df = pd.read_csv(HYBRID_SELECTED_PROFILES_TEST_CSV)
@@ -4318,6 +4374,45 @@ final_results_summary_df = pd.DataFrame(summary_rows)
 final_results_summary_df.to_csv(FINAL_SUMMARY_CSV, index=False)
 print(final_results_summary_df.to_string(index=False))
 print("Saved:", FINAL_SUMMARY_CSV)
+"""
+    ),
+    code_cell(
+        """
+def build_accuracy_tuning_comparison():
+    current = _architecture_test_metrics("YOLO11s")
+    rows = [
+        {
+            "experiment_tag": V16_YOLO11S_REFERENCE["experiment_tag"],
+            "model": "YOLO11s",
+            "precision": V16_YOLO11S_REFERENCE["precision"],
+            "recall": V16_YOLO11S_REFERENCE["recall"],
+            "mAP50": V16_YOLO11S_REFERENCE["mAP50"],
+            "mAP50_95": V16_YOLO11S_REFERENCE["mAP50_95"],
+            "delta_mAP50_vs_v16": 0.0,
+            "delta_mAP50_95_vs_v16": 0.0,
+            "notes": "Reference final full-analysis run",
+        }
+    ]
+    if current:
+        rows.append({
+            "experiment_tag": EXPERIMENT_TAG,
+            "model": "YOLO11s",
+            "precision": current.get("precision", np.nan),
+            "recall": current.get("recall", np.nan),
+            "mAP50": current.get("mAP50", np.nan),
+            "mAP50_95": current.get("mAP50_95", np.nan),
+            "delta_mAP50_vs_v16": current.get("mAP50", np.nan) - V16_YOLO11S_REFERENCE["mAP50"],
+            "delta_mAP50_95_vs_v16": current.get("mAP50_95", np.nan) - V16_YOLO11S_REFERENCE["mAP50_95"],
+            "notes": "Longer YOLO11s training with close_mosaic; RT-DETR/hybrid phases disabled",
+        })
+    comparison_df = pd.DataFrame(rows)
+    comparison_df.to_csv(ACCURACY_TUNING_COMPARISON_CSV, index=False)
+    print(comparison_df.to_string(index=False))
+    print("Saved:", ACCURACY_TUNING_COMPARISON_CSV)
+    return comparison_df
+
+
+accuracy_tuning_comparison_df = build_accuracy_tuning_comparison()
 """
     ),
     markdown_cell(
