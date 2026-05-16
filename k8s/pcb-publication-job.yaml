@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pcb-publication-job
+  namespace: csuf-titans
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: pcb-publication-job
+    spec:
+      restartPolicy: Never
+      priorityClassName: opportunistic
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends git libgl1 libglib2.0-0
+              python -m pip install --upgrade pip
+              python -m pip install ultralytics albumentations ensemble-boxes pycocotools opencv-python pandas numpy matplotlib scikit-learn onnx onnxruntime tqdm pyyaml
+              cd /workspace
+              if [ ! -d Capstone_project ]; then
+                git clone https://github.com/adit24dhaya/Capstone_project.git
+              fi
+              cd /workspace/Capstone_project
+              git pull
+              python tools/run_nautilus_experiments.py \
+                --experiment detector_train \
+                --data-root /workspace/data \
+                --output-dir /workspace/outputs/nautilus \
+                --file-mode symlink \
+                --yolo-model yolo11m.pt \
+                --run-name yolo11m_publication \
+                --imgsz 1280 \
+                --batch 4 \
+                --epochs 100 \
+                --workers 4 \
+                --device 0
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: pcb-publication-workspace
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

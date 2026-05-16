@@ -22,6 +22,8 @@ This project implements an end-to-end PCB defect detection workflow aligned with
 - `kaggle_kernel/project.ipynb` - uploadable Kaggle kernel copy.
 - `kaggle_kernel/kernel-metadata.json` - Kaggle kernel metadata with GPU and dataset settings.
 - `tools/make_gpu_notebook.py` - generator for rebuilding the Kaggle notebook.
+- `tools/run_nautilus_experiments.py` - portable Nautilus/Kubernetes runner for publication experiments.
+- `k8s/` - Nautilus Kubernetes Job templates for long GPU runs.
 - `PROJECT_ALIGNMENT.md` - mapping between proposal requirements and implementation.
 
 ## Dataset
@@ -100,6 +102,45 @@ After a successful Kaggle run, the important generated files are expected in `/k
 - The final publication-analysis path adds adaptive defect-aware fusion, defect-size metrics, inspection-burden metrics, and confidence calibration outputs.
 - Synthetic copy-paste defect augmentation and the custom CNN-Transformer patch refiner are implemented to support the survey-paper discussion around augmentation and feature-level CNN-Transformer modeling. The refiner is treated as an experimental extension because it underperforms the detector-level hybrid.
 - TensorRT export is documented as a Jetson-target deployment step because TensorRT engines are hardware/runtime specific; ONNX export is completed in Kaggle.
+
+## Publication Experiment Path
+
+The capstone notebook remains the stable final workflow. For publication work, use the Nautilus runner to add stronger baselines and generalization evidence.
+
+Recommended next experiments:
+
+1. Train stronger YOLO baselines: `YOLO11m` and, on larger GPUs, `YOLO11l`.
+2. Evaluate stronger transformer baselines such as `RT-DETR-X` when GPU memory allows.
+3. Keep Faster R-CNN as a two-stage high-recall baseline.
+4. Convert external COCO-style datasets such as DsPCBSD+ into the six-class project taxonomy.
+5. Run defect-size, calibration, and industrial FP/FN cost analyses.
+6. Run adaptive defect-aware fusion when both YOLO and RT-DETR weights are available.
+
+Example Nautilus commands:
+
+```bash
+python tools/run_nautilus_experiments.py \
+  --experiment detector_train \
+  --data-root ~/data \
+  --output-dir ~/outputs/nautilus \
+  --yolo-model yolo11m.pt \
+  --run-name yolo11m_publication \
+  --imgsz 1280 \
+  --batch 4 \
+  --epochs 100 \
+  --workers 0
+
+python tools/run_nautilus_experiments.py \
+  --experiment detector_eval \
+  --data-root ~/data \
+  --output-dir ~/outputs/nautilus \
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11m_publication/weights/best.pt \
+  --imgsz 1280 \
+  --split test \
+  --workers 0
+```
+
+For long runs, prefer Kubernetes Jobs from `k8s/` rather than browser-based `nohup`.
 
 ## Security Note
 
