@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import random
 import shutil
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -46,6 +48,30 @@ CLASS_ALIASES = {
 }
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+DSPCBSD_CLASS_ALIASES = {
+    "SH": "Short",
+    "short": "Short",
+    "short_circuit": "Short",
+    "SP": "Spur",
+    "spur": "Spur",
+    "SC": "Spurious_copper",
+    "spurious_copper": "Spurious_copper",
+    "spurious copper": "Spurious_copper",
+    "OP": "Open_circuit",
+    "open_circuit": "Open_circuit",
+    "open circuit": "Open_circuit",
+    "MB": "Mouse_bite",
+    "mouse_bite": "Mouse_bite",
+    "mouse bite": "Mouse_bite",
+}
+
+SIZE_BINS = [
+    ("tiny", 0.001),
+    ("small", 0.005),
+    ("medium", 0.02),
+    ("large", math.inf),
+]
 
 
 @dataclass
@@ -215,6 +241,86 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str] | None = None)
         writer.writerows(rows)
 
 
+def load_yaml(path: Path) -> dict:
+    import yaml
+
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected mapping in YAML file: {path}")
+    return data
+
+
+def resolve_dataset_path(base: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return (base / path).resolve()
+
+
+def split_source_to_images(source: Path) -> list[Path]:
+    if source.is_file() and source.suffix.lower() == ".txt":
+        paths = []
+        base = source.parent
+        for line in source.read_text().splitlines():
+            if not line.strip():
+                continue
+            paths.append(resolve_dataset_path(base, line.strip()))
+        return paths
+    if source.is_dir():
+        return sorted(p for p in source.rglob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
+    if source.is_file() and source.suffix.lower() in IMAGE_SUFFIXES:
+        return [source]
+    raise FileNotFoundError(f"Could not resolve image source: {source}")
+
+
+def infer_label_path(image_path: Path, data_root: Path, split: str) -> Path:
+    parts = list(image_path.parts)
+    if "images" in parts:
+        idx = parts.index("images")
+        label_parts = parts[:idx] + ["labels"] + parts[idx + 1 :]
+        return Path(*label_parts).with_suffix(".txt")
+    return data_root / "labels" / split / f"{image_path.stem}.txt"
+
+
+def load_yolo_items_from_data_yaml(data_yaml: Path, split: str) -> list[dict]:
+    from PIL import Image
+
+    cfg = load_yaml(data_yaml)
+    root = resolve_dataset_path(data_yaml.parent, cfg.get("path", "."))
+    source_value = cfg.get(split) or cfg.get("val")
+    if not source_value:
+        raise ValueError(f"No {split!r} or 'val' split found in {data_yaml}")
+    source = resolve_dataset_path(root, source_value)
+    image_paths = split_source_to_images(source)
+    items: list[dict] = []
+    for image_path in image_paths:
+        with Image.open(image_path) as img:
+            width, height = img.size
+        label_path = infer_label_path(image_path, root, split)
+        boxes: list[list[float]] = []
+        labels: list[int] = []
+        if label_path.exists():
+            for line in label_path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                class_id, box = yolo_label_to_xyxy(line, width, height)
+                if box[2] > box[0] and box[3] > box[1]:
+                    boxes.append(box)
+                    labels.append(class_id)
+        items.append(
+            {
+                "image_path": image_path,
+                "label_path": label_path,
+                "width": width,
+                "height": height,
+                "boxes": boxes,
+                "labels": labels,
+            }
+        )
+    return items
+
+
 def copy_or_link(src: Path, dst: Path, mode: str) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
@@ -291,6 +397,173 @@ def convert_current_pcb_to_yolo(data_root: Path, output_dir: Path, seed: int, fi
     }
     write_text(manifest_path, json.dumps(manifest, indent=2))
     write_text(summary_path, json.dumps(summary, indent=2))
+    return summary
+
+
+def normalize_external_class(name: str, class_map: dict[str, str]) -> str | None:
+    raw = str(name).strip()
+    candidates = [raw, raw.replace("-", "_"), raw.replace("_", " "), raw.lower(), raw.upper()]
+    for candidate in candidates:
+        if candidate in class_map:
+            return class_map[candidate]
+        if candidate in DSPCBSD_CLASS_ALIASES:
+            return DSPCBSD_CLASS_ALIASES[candidate]
+    key = raw.replace("-", "_").replace(" ", "_").lower()
+    if key in CLASS_ALIASES:
+        return CLASS_ALIASES[key]
+    if raw in CLASS_NAMES:
+        return raw
+    return None
+
+
+def locate_coco_image(coco_root: Path, file_name: str) -> Path:
+    direct = coco_root / file_name
+    if direct.exists():
+        return direct
+    candidates = [
+        coco_root / "images" / file_name,
+        coco_root / "train2017" / file_name,
+        coco_root / "val2017" / file_name,
+        coco_root / "test2017" / file_name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    matches = list(coco_root.rglob(Path(file_name).name))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(f"Could not locate COCO image: {file_name}")
+
+
+def infer_coco_split(json_path: Path) -> str:
+    name = json_path.stem.lower()
+    if "test" in name:
+        return "test"
+    if "val" in name:
+        return "val"
+    return "train"
+
+
+def find_coco_annotation_files(coco_root: Path) -> list[Path]:
+    candidates = []
+    for directory in [coco_root, coco_root / "annotations"]:
+        if directory.exists():
+            candidates.extend(directory.glob("*.json"))
+    return sorted(path for path in candidates if path.is_file())
+
+
+def convert_coco_to_yolo_dataset(
+    coco_root: Path,
+    output_dir: Path,
+    dataset_name: str,
+    file_mode: str,
+    class_map: dict[str, str] | None = None,
+) -> dict:
+    """Convert COCO-style detection annotations into the six-class YOLO taxonomy.
+
+    This is intended for DsPCBSD+ and other publication datasets. Unmapped
+    categories are skipped by default so the benchmark remains comparable with
+    the original six-class capstone taxonomy.
+    """
+
+    class_map = class_map or {}
+    annotation_files = find_coco_annotation_files(coco_root)
+    if not annotation_files:
+        raise FileNotFoundError(f"No COCO JSON annotation files found under {coco_root}")
+
+    yolo_root = output_dir / "datasets" / f"{dataset_name}_yolo"
+    summary_rows: list[dict] = []
+    skipped_categories: dict[str, int] = defaultdict(int)
+    image_counts: dict[str, int] = defaultdict(int)
+    box_counts: dict[str, int] = defaultdict(int)
+
+    for ann_path in annotation_files:
+        split = infer_coco_split(ann_path)
+        data = json.loads(ann_path.read_text())
+        categories = {cat["id"]: cat.get("name", str(cat["id"])) for cat in data.get("categories", [])}
+        images = {image["id"]: image for image in data.get("images", [])}
+        grouped_annotations: dict[int, list[dict]] = defaultdict(list)
+        for ann in data.get("annotations", []):
+            grouped_annotations[ann["image_id"]].append(ann)
+
+        for image_id, image_info in images.items():
+            file_name = image_info.get("file_name")
+            if not file_name:
+                continue
+            src_image = locate_coco_image(coco_root, file_name)
+            width = int(image_info.get("width") or 0)
+            height = int(image_info.get("height") or 0)
+            if width <= 0 or height <= 0:
+                from PIL import Image
+
+                with Image.open(src_image) as img:
+                    width, height = img.size
+
+            dst_image = yolo_root / "images" / split / src_image.name
+            dst_label = yolo_root / "labels" / split / f"{src_image.stem}.txt"
+            copy_or_link(src_image, dst_image, file_mode)
+
+            label_lines: list[str] = []
+            for ann in grouped_annotations.get(image_id, []):
+                raw_cat = categories.get(ann.get("category_id"), str(ann.get("category_id")))
+                mapped = normalize_external_class(raw_cat, class_map)
+                if mapped is None:
+                    skipped_categories[raw_cat] += 1
+                    continue
+                x, y, bw, bh = [float(v) for v in ann.get("bbox", [0, 0, 0, 0])]
+                if bw <= 0 or bh <= 0:
+                    continue
+                xc = (x + bw / 2.0) / width
+                yc = (y + bh / 2.0) / height
+                nw = bw / width
+                nh = bh / height
+                class_id = CLASS_NAMES.index(mapped)
+                label_lines.append(f"{class_id} {xc:.8f} {yc:.8f} {nw:.8f} {nh:.8f}")
+            write_text(dst_label, "\n".join(label_lines) + ("\n" if label_lines else ""))
+            image_counts[split] += 1
+            box_counts[split] += len(label_lines)
+            summary_rows.append(
+                {
+                    "split": split,
+                    "image_path": str(dst_image),
+                    "label_path": str(dst_label),
+                    "width": width,
+                    "height": height,
+                    "boxes": len(label_lines),
+                    "source_json": str(ann_path),
+                }
+            )
+
+    data_yaml = yolo_root / "data.yaml"
+    split_lines = []
+    for split in ["train", "val", "test"]:
+        if (yolo_root / "images" / split).exists():
+            split_lines.append(f"{split}: images/{split}")
+    yaml_text = "\n".join(
+        [
+            f"path: {yolo_root}",
+            *split_lines,
+            "names:",
+            *[f"  {i}: {name}" for i, name in enumerate(CLASS_NAMES)],
+            "",
+        ]
+    )
+    write_text(data_yaml, yaml_text)
+    write_csv(yolo_root / "conversion_manifest.csv", summary_rows)
+
+    summary = {
+        "dataset_name": dataset_name,
+        "coco_root": str(coco_root),
+        "yolo_root": str(yolo_root),
+        "data_yaml": str(data_yaml),
+        "classes": CLASS_NAMES,
+        "image_counts": dict(image_counts),
+        "box_counts": dict(box_counts),
+        "skipped_categories": dict(skipped_categories),
+        "records": len(summary_rows),
+        "file_mode": file_mode,
+    }
+    write_text(output_dir / f"{dataset_name}_coco_conversion_summary.json", json.dumps(summary, indent=2))
     return summary
 
 
@@ -519,6 +792,427 @@ def detection_metrics_iou50(
     }
 
 
+def size_bin_for_box(box: list[float], width: int, height: int) -> str:
+    area_ratio = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]) / max(1.0, float(width * height))
+    for name, upper in SIZE_BINS:
+        if area_ratio < upper:
+            return name
+    return "large"
+
+
+def match_detection_events(
+    gt_item: dict,
+    pred_item: dict,
+    score_threshold: float,
+    iou_threshold: float = 0.5,
+) -> list[dict]:
+    events: list[dict] = []
+    gt_boxes = gt_item["boxes"]
+    gt_labels = gt_item["labels"]
+    pred_rows = [
+        (box, int(label), float(score))
+        for box, label, score in zip(pred_item["boxes"], pred_item["labels"], pred_item["scores"])
+        if float(score) >= score_threshold
+    ]
+    pred_rows.sort(key=lambda row: row[2], reverse=True)
+    matched_gt: set[int] = set()
+
+    for pred_box, pred_label, score in pred_rows:
+        best_iou = 0.0
+        best_idx = -1
+        for idx, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels)):
+            if idx in matched_gt or int(gt_label) != pred_label:
+                continue
+            iou = box_iou(pred_box, gt_box)
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+        if best_iou >= iou_threshold and best_idx >= 0:
+            matched_gt.add(best_idx)
+            events.append(
+                {
+                    "event": "TP",
+                    "class_id": pred_label,
+                    "class_name": CLASS_NAMES[pred_label],
+                    "score": score,
+                    "iou": best_iou,
+                    "size_bin": size_bin_for_box(gt_boxes[best_idx], gt_item["width"], gt_item["height"]),
+                }
+            )
+        else:
+            events.append(
+                {
+                    "event": "FP",
+                    "class_id": pred_label,
+                    "class_name": CLASS_NAMES[pred_label] if 0 <= pred_label < len(CLASS_NAMES) else str(pred_label),
+                    "score": score,
+                    "iou": best_iou,
+                    "size_bin": size_bin_for_box(pred_box, gt_item["width"], gt_item["height"]),
+                }
+            )
+
+    for idx, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels)):
+        if idx in matched_gt:
+            continue
+        events.append(
+            {
+                "event": "FN",
+                "class_id": int(gt_label),
+                "class_name": CLASS_NAMES[int(gt_label)],
+                "score": None,
+                "iou": 0.0,
+                "size_bin": size_bin_for_box(gt_box, gt_item["width"], gt_item["height"]),
+            }
+        )
+    return events
+
+
+def dataset_events(ground_truth: list[dict], predictions: list[dict], score_threshold: float) -> list[dict]:
+    rows: list[dict] = []
+    for image_idx, (gt_item, pred_item) in enumerate(zip(ground_truth, predictions)):
+        for event in match_detection_events(gt_item, pred_item, score_threshold):
+            rows.append({"image_idx": image_idx, **event})
+    return rows
+
+
+def summarize_events_by_size(events: list[dict], images: int) -> list[dict]:
+    rows = []
+    for size_name, _upper in SIZE_BINS:
+        subset = [row for row in events if row["size_bin"] == size_name]
+        tp = sum(row["event"] == "TP" for row in subset)
+        fp = sum(row["event"] == "FP" for row in subset)
+        fn = sum(row["event"] == "FN" for row in subset)
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        rows.append(
+            {
+                "size_bin": size_name,
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "precision": precision,
+                "recall": recall,
+                "fp_per_image": fp / max(1, images),
+            }
+        )
+    return rows
+
+
+def summarize_cost(events: list[dict], images: int, missed_defect_penalty: float) -> dict:
+    fp = sum(row["event"] == "FP" for row in events)
+    fn = sum(row["event"] == "FN" for row in events)
+    fp_per_image = fp / max(1, images)
+    fn_per_image = fn / max(1, images)
+    return {
+        "false_positives": fp,
+        "missed_defects": fn,
+        "images": images,
+        "fp_per_image": fp_per_image,
+        "fn_per_image": fn_per_image,
+        "missed_defect_penalty": missed_defect_penalty,
+        "inspection_cost": fp_per_image + missed_defect_penalty * fn_per_image,
+    }
+
+
+def summarize_calibration(events: list[dict], bins: int) -> tuple[dict, list[dict]]:
+    pred_events = [row for row in events if row["event"] in {"TP", "FP"} and row["score"] is not None]
+    if not pred_events:
+        return {"ece": 0.0, "samples": 0, "bins": bins}, []
+    rows = []
+    ece = 0.0
+    for idx in range(bins):
+        low = idx / bins
+        high = (idx + 1) / bins
+        if idx == bins - 1:
+            subset = [row for row in pred_events if low <= float(row["score"]) <= high]
+        else:
+            subset = [row for row in pred_events if low <= float(row["score"]) < high]
+        count = len(subset)
+        accuracy = sum(row["event"] == "TP" for row in subset) / count if count else 0.0
+        confidence = sum(float(row["score"]) for row in subset) / count if count else 0.0
+        gap = abs(accuracy - confidence)
+        ece += (count / len(pred_events)) * gap
+        rows.append(
+            {
+                "bin": idx,
+                "confidence_low": low,
+                "confidence_high": high,
+                "count": count,
+                "accuracy": accuracy,
+                "avg_confidence": confidence,
+                "abs_gap": gap,
+            }
+        )
+    return {"ece": ece, "samples": len(pred_events), "bins": bins}, rows
+
+
+def predict_ultralytics_on_items(model_path: str, items: list[dict], args: argparse.Namespace) -> tuple[list[dict], float]:
+    from tqdm import tqdm
+    from ultralytics import YOLO
+
+    model = YOLO(model_path)
+    predictions: list[dict] = []
+    started = time.perf_counter()
+    for item in tqdm(items, desc=f"Predict {Path(model_path).name}"):
+        result = model.predict(
+            source=str(item["image_path"]),
+            imgsz=args.imgsz,
+            conf=args.pred_conf,
+            iou=args.nms_iou,
+            device=args.device,
+            verbose=False,
+        )[0]
+        if result.boxes is None:
+            predictions.append({"boxes": [], "labels": [], "scores": []})
+            continue
+        predictions.append(
+            {
+                "boxes": result.boxes.xyxy.detach().cpu().tolist(),
+                "labels": [int(x) for x in result.boxes.cls.detach().cpu().tolist()],
+                "scores": [float(x) for x in result.boxes.conf.detach().cpu().tolist()],
+            }
+        )
+    elapsed = time.perf_counter() - started
+    return predictions, (elapsed / max(1, len(items))) * 1000.0
+
+
+def evaluate_prediction_bundle(
+    items: list[dict],
+    predictions: list[dict],
+    output_prefix: Path,
+    model_name: str,
+    split: str,
+    args: argparse.Namespace,
+) -> dict:
+    gt = [{"boxes": item["boxes"], "labels": item["labels"], "width": item["width"], "height": item["height"]} for item in items]
+    metrics = detection_metrics_iou50(gt, predictions, score_threshold=args.eval_conf)
+    metrics.update({"model": model_name, "split": split, "images": len(items), "eval_conf": args.eval_conf})
+    events = dataset_events(gt, predictions, score_threshold=args.eval_conf)
+    size_rows = summarize_events_by_size(events, len(items))
+    cost_row = summarize_cost(events, len(items), args.missed_defect_penalty)
+    calibration_metrics, calibration_rows = summarize_calibration(events, args.calibration_bins)
+    calibration_metrics.update({"model": model_name, "split": split})
+
+    write_csv(output_prefix.with_name(f"{output_prefix.name}_metrics.csv"), [metrics])
+    write_csv(output_prefix.with_name(f"{output_prefix.name}_per_class.csv"), metrics["per_class"])
+    write_csv(output_prefix.with_name(f"{output_prefix.name}_defect_size.csv"), size_rows)
+    write_csv(output_prefix.with_name(f"{output_prefix.name}_inspection_cost.csv"), [cost_row])
+    write_csv(output_prefix.with_name(f"{output_prefix.name}_calibration_bins.csv"), calibration_rows)
+    write_text(output_prefix.with_name(f"{output_prefix.name}_calibration_metrics.json"), json.dumps(calibration_metrics, indent=2))
+    write_text(output_prefix.with_name(f"{output_prefix.name}_predictions.json"), json.dumps(predictions[: args.prediction_save_limit], indent=2))
+    return metrics
+
+
+def run_convert_coco(args: argparse.Namespace) -> None:
+    output_dir = expand_path(args.output_dir)
+    if not args.coco_root:
+        raise SystemExit("--coco-root is required for --experiment convert_coco")
+    class_map = json.loads(args.coco_class_map) if args.coco_class_map else {}
+    summary = convert_coco_to_yolo_dataset(
+        coco_root=expand_path(args.coco_root),
+        output_dir=output_dir,
+        dataset_name=args.dataset_name,
+        file_mode=args.file_mode,
+        class_map=class_map,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+def run_detector_train(args: argparse.Namespace) -> None:
+    from ultralytics import YOLO
+
+    output_dir = expand_path(args.output_dir)
+    summary = load_conversion_summary(args)
+    data_yaml = args.external_data_yaml or summary["data_yaml"]
+    model = YOLO(args.yolo_model)
+    name = args.run_name or Path(args.yolo_model).stem
+    train_dir = output_dir / "runs" / "detector_train"
+    result = model.train(
+        data=data_yaml,
+        imgsz=args.imgsz,
+        epochs=args.epochs,
+        batch=args.batch,
+        device=args.device,
+        workers=args.workers,
+        project=str(train_dir),
+        name=name,
+        exist_ok=True,
+        patience=args.patience,
+        cos_lr=args.cos_lr,
+        cache=args.cache,
+        close_mosaic=args.close_mosaic,
+    )
+    best_weights = train_dir / name / "weights" / "best.pt"
+    rows = []
+    eval_model = YOLO(str(best_weights if best_weights.exists() else args.yolo_model))
+    for split in ["val", "test"]:
+        metrics = eval_model.val(data=data_yaml, imgsz=args.imgsz, batch=args.batch, device=args.device, split=split)
+        rows.append(
+            {
+                "model": name,
+                "split": split,
+                "weights": str(best_weights),
+                "precision": float(metrics.box.mp),
+                "recall": float(metrics.box.mr),
+                "mAP50": float(metrics.box.map50),
+                "mAP50_95": float(metrics.box.map),
+            }
+        )
+    write_csv(train_dir / name / "detector_train_metrics.csv", rows)
+    summary_out = {"run_dir": str(train_dir / name), "best_weights": str(best_weights), "results_type": str(type(result)), "metrics": rows}
+    write_text(train_dir / name / "detector_train_summary.json", json.dumps(summary_out, indent=2))
+    print(json.dumps(summary_out, indent=2))
+
+
+def run_detector_eval(args: argparse.Namespace) -> None:
+    output_dir = expand_path(args.output_dir)
+    if args.external_data_yaml:
+        data_yaml = expand_path(args.external_data_yaml)
+        items = load_yolo_items_from_data_yaml(data_yaml, args.split)
+    else:
+        summary = load_conversion_summary(args)
+        data_yaml = Path(summary["data_yaml"])
+        items = load_yolo_dataset_items(Path(summary["yolo_root"]), args.split)
+
+    run_dir = output_dir / "runs" / "detector_eval"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    predictions, mean_ms = predict_ultralytics_on_items(args.yolo_weights, items, args)
+    prefix = run_dir / f"{Path(args.yolo_weights).stem}_{args.split}"
+    metrics = evaluate_prediction_bundle(items, predictions, prefix, Path(args.yolo_weights).stem, args.split, args)
+    metrics.update({"data_yaml": str(data_yaml), "mean_ms": mean_ms})
+    write_csv(prefix.with_name(f"{prefix.name}_metrics.csv"), [metrics])
+    print(json.dumps(metrics, indent=2))
+
+
+def wbf_fuse_image(
+    yolo_pred: dict,
+    transformer_pred: dict,
+    width: int,
+    height: int,
+    policy: dict,
+    args: argparse.Namespace,
+) -> dict:
+    try:
+        from ensemble_boxes import weighted_boxes_fusion
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Install ensemble-boxes before running adaptive fusion") from exc
+
+    fused_boxes: list[list[float]] = []
+    fused_scores: list[float] = []
+    fused_labels: list[int] = []
+    for class_id, class_name in enumerate(CLASS_NAMES):
+        class_policy = policy["classes"].get(class_name, {})
+        yolo_weight = float(class_policy.get("yolo_weight", 0.5))
+        transformer_weight = float(class_policy.get("transformer_weight", 0.5))
+        threshold = float(class_policy.get("conf_threshold", args.eval_conf))
+        boxes_list = []
+        scores_list = []
+        labels_list = []
+        for pred in [yolo_pred, transformer_pred]:
+            boxes = []
+            scores = []
+            labels = []
+            for box, label, score in zip(pred["boxes"], pred["labels"], pred["scores"]):
+                if int(label) != class_id or float(score) < args.pred_conf:
+                    continue
+                x1, y1, x2, y2 = box
+                boxes.append(
+                    [
+                        max(0.0, min(1.0, x1 / width)),
+                        max(0.0, min(1.0, y1 / height)),
+                        max(0.0, min(1.0, x2 / width)),
+                        max(0.0, min(1.0, y2 / height)),
+                    ]
+                )
+                scores.append(float(score))
+                labels.append(class_id)
+            boxes_list.append(boxes)
+            scores_list.append(scores)
+            labels_list.append(labels)
+        if not any(boxes_list):
+            continue
+        boxes, scores, labels = weighted_boxes_fusion(
+            boxes_list,
+            scores_list,
+            labels_list,
+            weights=[yolo_weight, transformer_weight],
+            iou_thr=args.fusion_iou,
+            skip_box_thr=args.pred_conf,
+        )
+        for box, score, label in zip(boxes, scores, labels):
+            if float(score) < threshold:
+                continue
+            fused_boxes.append([box[0] * width, box[1] * height, box[2] * width, box[3] * height])
+            fused_scores.append(float(score))
+            fused_labels.append(int(label))
+    return {"boxes": fused_boxes, "scores": fused_scores, "labels": fused_labels}
+
+
+def learn_adaptive_policy(val_items: list[dict], yolo_preds: list[dict], transformer_preds: list[dict], args: argparse.Namespace) -> dict:
+    gt = [{"boxes": item["boxes"], "labels": item["labels"], "width": item["width"], "height": item["height"]} for item in val_items]
+    yolo_metrics = detection_metrics_iou50(gt, yolo_preds, score_threshold=args.eval_conf)
+    transformer_metrics = detection_metrics_iou50(gt, transformer_preds, score_threshold=args.eval_conf)
+    policy = {
+        "method": "validation_calibrated_classwise_wbf",
+        "fusion_iou": args.fusion_iou,
+        "base_conf": args.eval_conf,
+        "classes": {},
+    }
+    for class_id, class_name in enumerate(CLASS_NAMES):
+        y = yolo_metrics["per_class"][class_id]
+        t = transformer_metrics["per_class"][class_id]
+        y_f1 = 2 * y["precision"] * y["recall"] / (y["precision"] + y["recall"]) if y["precision"] + y["recall"] else 0.0
+        t_f1 = 2 * t["precision"] * t["recall"] / (t["precision"] + t["recall"]) if t["precision"] + t["recall"] else 0.0
+        delta = max(-0.25, min(0.25, (y_f1 - t_f1) * 0.25))
+        conf = args.eval_conf
+        if y["precision"] < 0.65 and t["precision"] < 0.65:
+            conf += 0.10
+        if y["recall"] < 0.75 and t["recall"] < 0.75:
+            conf = max(args.pred_conf, conf - 0.05)
+        policy["classes"][class_name] = {
+            "yolo_weight": round(0.5 + delta, 3),
+            "transformer_weight": round(0.5 - delta, 3),
+            "conf_threshold": round(conf, 3),
+            "yolo_val_precision": y["precision"],
+            "yolo_val_recall": y["recall"],
+            "transformer_val_precision": t["precision"],
+            "transformer_val_recall": t["recall"],
+        }
+    return policy
+
+
+def run_adaptive_fusion(args: argparse.Namespace) -> None:
+    output_dir = expand_path(args.output_dir)
+    if not args.rtdetr_weights:
+        raise SystemExit("--rtdetr-weights is required for adaptive fusion")
+    summary = load_conversion_summary(args)
+    yolo_root = Path(summary["yolo_root"])
+    run_dir = output_dir / "runs" / "adaptive_fusion"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    val_items = load_yolo_dataset_items(yolo_root, "val")
+    test_items = load_yolo_dataset_items(yolo_root, "test")
+    val_yolo, _ = predict_ultralytics_on_items(args.yolo_weights, val_items, args)
+    val_transformer, _ = predict_ultralytics_on_items(args.rtdetr_weights, val_items, args)
+    policy = learn_adaptive_policy(val_items, val_yolo, val_transformer, args)
+    write_text(run_dir / "adaptive_defect_aware_policy.json", json.dumps(policy, indent=2))
+    write_csv(
+        run_dir / "adaptive_defect_aware_policy.csv",
+        [{"class_name": name, **values} for name, values in policy["classes"].items()],
+    )
+
+    test_yolo, yolo_ms = predict_ultralytics_on_items(args.yolo_weights, test_items, args)
+    test_transformer, transformer_ms = predict_ultralytics_on_items(args.rtdetr_weights, test_items, args)
+    fused_preds = [
+        wbf_fuse_image(y_pred, t_pred, item["width"], item["height"], policy, args)
+        for item, y_pred, t_pred in zip(test_items, test_yolo, test_transformer)
+    ]
+    prefix = run_dir / "adaptive_defect_aware_hybrid_test"
+    metrics = evaluate_prediction_bundle(test_items, fused_preds, prefix, "Adaptive Defect-Aware Hybrid", "test", args)
+    metrics.update({"mean_component_ms": yolo_ms + transformer_ms})
+    write_csv(prefix.with_name(f"{prefix.name}_metrics.csv"), [metrics])
+    print(json.dumps({"policy": policy, "test": metrics}, indent=2))
+
 class YoloDetectionDataset:
     def __init__(self, yolo_root: Path, split: str, max_items: int | None = None) -> None:
         self.items = load_yolo_dataset_items(yolo_root, split)
@@ -681,6 +1375,8 @@ def run_cross_dataset(args: argparse.Namespace) -> None:
             data_root / "deeppcb" / "data.yaml",
             data_root / "mendeley_pcb_yolo" / "data.yaml",
             data_root / "mendeley_pcb" / "data.yaml",
+            data_root / "dspcbsd_yolo" / "data.yaml",
+            data_root / "dspcbsd" / "data.yaml",
         ]
     )
     existing = []
@@ -808,6 +1504,41 @@ def run_research_batch(args: argparse.Namespace) -> None:
     print(json.dumps({"steps": steps}, indent=2))
 
 
+def run_publication_batch(args: argparse.Namespace) -> None:
+    """Run publication-oriented analyses that do not require retraining by default."""
+    output_dir = expand_path(args.output_dir)
+    batch_log = output_dir / "publication_batch_status.json"
+    steps: list[dict] = []
+    selected_steps = [
+        ("smoke", run_smoke),
+        ("segmentation_pilot", run_segmentation_pilot),
+        ("detector_eval", run_detector_eval),
+    ]
+    if args.rtdetr_weights:
+        selected_steps.append(("adaptive_fusion", run_adaptive_fusion))
+    selected_steps.append(("cross_dataset", run_cross_dataset))
+
+    for name, fn in selected_steps:
+        started = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            fn(args)
+            steps.append({"step": name, "status": "completed", "started": started, "finished": time.strftime("%Y-%m-%d %H:%M:%S")})
+        except Exception as exc:  # noqa: BLE001
+            steps.append(
+                {
+                    "step": name,
+                    "status": "failed",
+                    "started": started,
+                    "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "error": repr(exc),
+                }
+            )
+            write_text(batch_log, json.dumps({"steps": steps}, indent=2))
+            raise
+        write_text(batch_log, json.dumps({"steps": steps}, indent=2))
+    print(json.dumps({"steps": steps}, indent=2))
+
+
 def placeholder(name: str) -> None:
     raise SystemExit(
         f"Experiment {name!r} is not implemented yet. "
@@ -819,7 +1550,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--experiment",
-        choices=["smoke", "yolo_smoke", "faster_rcnn", "cross_dataset", "segmentation_pilot", "research_batch"],
+        choices=[
+            "smoke",
+            "yolo_smoke",
+            "detector_train",
+            "detector_eval",
+            "faster_rcnn",
+            "cross_dataset",
+            "segmentation_pilot",
+            "convert_coco",
+            "adaptive_fusion",
+            "research_batch",
+            "publication_batch",
+        ],
         required=True,
     )
     parser.add_argument("--data-root", default="~/data", help="Root containing current_pcb/, deeppcb/, etc.")
@@ -827,21 +1570,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--file-mode", choices=["symlink", "copy"], default="symlink")
     parser.add_argument("--yolo-model", default="yolo11n.pt")
+    parser.add_argument("--run-name", default=None)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", default="0")
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--close-mosaic", type=int, default=10)
+    parser.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--cache", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-train-items", type=int, default=None)
     parser.add_argument("--max-eval-items", type=int, default=None)
     parser.add_argument("--frcnn-epochs", type=int, default=5)
     parser.add_argument("--frcnn-batch", type=int, default=2)
     parser.add_argument("--frcnn-lr", type=float, default=0.005)
     parser.add_argument("--eval-conf", type=float, default=0.25)
+    parser.add_argument("--pred-conf", type=float, default=0.01)
+    parser.add_argument("--nms-iou", type=float, default=0.7)
+    parser.add_argument("--fusion-iou", type=float, default=0.55)
+    parser.add_argument("--missed-defect-penalty", type=float, default=5.0)
+    parser.add_argument("--calibration-bins", type=int, default=10)
     parser.add_argument("--prediction-save-limit", type=int, default=20)
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--external-data-yaml", default=None)
     parser.add_argument("--yolo-weights", default="yolo11n.pt")
+    parser.add_argument("--rtdetr-weights", default=None)
+    parser.add_argument("--coco-root", default=None)
+    parser.add_argument("--dataset-name", default="dspcbsd")
+    parser.add_argument("--coco-class-map", default=None, help="JSON mapping from external category names to project class names.")
     parser.add_argument("--split", default="test")
     return parser
 
@@ -852,14 +1609,24 @@ def main(argv: Iterable[str] | None = None) -> None:
         run_smoke(args)
     elif args.experiment == "yolo_smoke":
         run_yolo_smoke(args)
+    elif args.experiment == "detector_train":
+        run_detector_train(args)
+    elif args.experiment == "detector_eval":
+        run_detector_eval(args)
     elif args.experiment == "faster_rcnn":
         run_faster_rcnn(args)
     elif args.experiment == "cross_dataset":
         run_cross_dataset(args)
     elif args.experiment == "segmentation_pilot":
         run_segmentation_pilot(args)
+    elif args.experiment == "convert_coco":
+        run_convert_coco(args)
+    elif args.experiment == "adaptive_fusion":
+        run_adaptive_fusion(args)
     elif args.experiment == "research_batch":
         run_research_batch(args)
+    elif args.experiment == "publication_batch":
+        run_publication_batch(args)
     else:
         placeholder(args.experiment)
 
