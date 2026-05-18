@@ -23,6 +23,7 @@ This project implements an end-to-end PCB defect detection workflow aligned with
 - `kaggle_kernel/kernel-metadata.json` - Kaggle kernel metadata with GPU and dataset settings.
 - `tools/make_gpu_notebook.py` - generator for rebuilding the Kaggle notebook.
 - `tools/run_nautilus_experiments.py` - portable Nautilus/Kubernetes runner for publication experiments.
+- `tools/bootstrap_nautilus.py` - repeatable Nautilus Jupyter reset recovery script.
 - `k8s/` - Nautilus Kubernetes Job templates for long GPU runs.
 - `PROJECT_ALIGNMENT.md` - mapping between proposal requirements and implementation.
 
@@ -141,6 +142,57 @@ python tools/run_nautilus_experiments.py \
 ```
 
 For long runs, prefer Kubernetes Jobs from `k8s/` rather than browser-based `nohup`.
+
+## Nautilus Jupyter Reset Recovery
+
+Nautilus Jupyter storage can reset. When that happens, first clone the repo again, then let the bootstrap script rebuild the Python environment, download the Kaggle PCB dataset, verify CUDA, and run the smoke conversion.
+
+```bash
+cd ~
+git clone https://github.com/adit24dhaya/Capstone_project.git || git -C Capstone_project pull
+cd ~/Capstone_project
+python tools/bootstrap_nautilus.py
+```
+
+The script expects Kaggle authentication in one of these locations:
+
+```bash
+mkdir -p ~/.kaggle
+chmod 700 ~/.kaggle
+nano ~/.kaggle/access_token
+chmod 600 ~/.kaggle/access_token
+```
+
+Or, for a one-session token without writing the command into shell history:
+
+```bash
+read -s KAGGLE_API_TOKEN
+export KAGGLE_API_TOKEN
+python tools/bootstrap_nautilus.py
+```
+
+To also download the latest Kaggle notebook outputs after the reset:
+
+```bash
+python tools/bootstrap_nautilus.py --download-kaggle-output
+```
+
+To start the YOLO11m publication run in the background after recovery:
+
+```bash
+python tools/bootstrap_nautilus.py \
+  --start-detector-train \
+  --yolo-model yolo11m.pt \
+  --run-name yolo11m_publication \
+  --imgsz 1280 \
+  --batch 2 \
+  --epochs 100 \
+  --workers 0
+
+tail -f ~/logs/yolo11m_publication.log
+```
+
+The bootstrap writes its status to `~/outputs/nautilus/bootstrap_status.json`.
 
 ## Security Note
 

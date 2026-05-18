@@ -18,6 +18,9 @@ data/
 kaggle_output/
 kaggle_logs/
 kaggle_cli_output/
+outputs/
+logs/
+backups/
 working/
 runs/
 vis_predictions/

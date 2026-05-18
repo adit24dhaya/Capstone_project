@@ -1046,7 +1046,15 @@ def run_detector_train(args: argparse.Namespace) -> None:
     rows = []
     eval_model = YOLO(str(best_weights if best_weights.exists() else args.yolo_model))
     for split in ["val", "test"]:
-        metrics = eval_model.val(data=data_yaml, imgsz=args.imgsz, batch=args.batch, device=args.device, split=split)
+        # Nautilus pods often expose only ~64MB /dev/shm; default val workers exhaust shm (Bus error).
+        metrics = eval_model.val(
+            data=data_yaml,
+            imgsz=args.imgsz,
+            batch=args.batch,
+            device=args.device,
+            split=split,
+            workers=args.workers,
+        )
         rows.append(
             {
                 "model": name,
@@ -1399,7 +1407,14 @@ def run_cross_dataset(args: argparse.Namespace) -> None:
     model = YOLO(args.yolo_weights)
     rows = []
     for data_yaml in existing:
-        result = model.val(data=str(data_yaml), imgsz=args.imgsz, batch=args.batch, device=args.device, split=args.split)
+        result = model.val(
+            data=str(data_yaml),
+            imgsz=args.imgsz,
+            batch=args.batch,
+            device=args.device,
+            split=args.split,
+            workers=args.workers,
+        )
         row = {
             "dataset_yaml": str(data_yaml),
             "split": args.split,
