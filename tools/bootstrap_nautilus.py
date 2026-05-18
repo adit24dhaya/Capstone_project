@@ -10,6 +10,7 @@ printed.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import shlex
@@ -78,9 +79,10 @@ def kaggle_bin() -> str:
     return str(fallback)
 
 
-def configure_kaggle_auth(token_env: str) -> bool:
+def configure_kaggle_auth(token_env: str, *, prompt: bool = True) -> bool:
     kaggle_dir = Path.home() / ".kaggle"
     kaggle_dir.mkdir(mode=0o700, exist_ok=True)
+    kaggle_dir.chmod(0o700)
     access_token = kaggle_dir / "access_token"
     kaggle_json = kaggle_dir / "kaggle.json"
 
@@ -101,11 +103,25 @@ def configure_kaggle_auth(token_env: str) -> bool:
         print("Kaggle auth found at ~/.kaggle/kaggle.json.")
         return True
 
+    if prompt and sys.stdin.isatty():
+        print("Kaggle auth is missing. Paste your Kaggle access token below; input is hidden.")
+        pasted = getpass.getpass("Kaggle access token: ").strip()
+        if pasted:
+            access_token.write_text(pasted + "\n", encoding="utf-8")
+            access_token.chmod(0o600)
+            print("Kaggle token saved to ~/.kaggle/access_token.")
+            return True
+
     print(
         "Kaggle auth was not found. Add ~/.kaggle/access_token or export "
         f"{token_env} before downloading Kaggle data."
     )
     return False
+
+
+def require_kaggle_auth(args: argparse.Namespace) -> None:
+    if not configure_kaggle_auth(args.kaggle_token_env, prompt=args.prompt_kaggle_token):
+        raise RuntimeError("Kaggle authentication is required for the requested bootstrap steps.")
 
 
 def current_pcb_exists(data_root: Path) -> bool:
@@ -140,7 +156,7 @@ def download_dataset(args: argparse.Namespace, data_root: Path) -> None:
     if current_pcb_exists(data_root) and not args.force_dataset:
         print(f"Current PCB dataset already exists under {data_root}; skipping download.")
         return
-    if not configure_kaggle_auth(args.kaggle_token_env):
+    if not configure_kaggle_auth(args.kaggle_token_env, prompt=False):
         raise RuntimeError("Cannot download the dataset until Kaggle auth is configured.")
     dataset_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -178,7 +194,7 @@ def run_smoke(repo_dir: Path, args: argparse.Namespace, data_root: Path, output_
 
 
 def download_kaggle_outputs(repo_dir: Path, args: argparse.Namespace) -> None:
-    if not configure_kaggle_auth(args.kaggle_token_env):
+    if not configure_kaggle_auth(args.kaggle_token_env, prompt=False):
         raise RuntimeError("Cannot download Kaggle outputs until Kaggle auth is configured.")
     target = expand_path(args.kaggle_output_dir)
     target.mkdir(parents=True, exist_ok=True)
@@ -251,6 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kernel-slug", default="aditya2402/project")
     parser.add_argument("--kaggle-output-dir", default="~/Capstone_project/kaggle_cli_output/current_artifacts")
     parser.add_argument("--kaggle-token-env", default="KAGGLE_API_TOKEN")
+    parser.add_argument("--prompt-kaggle-token", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-kaggle-token-only", action="store_true")
     parser.add_argument("--install-deps", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--download-dataset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force-dataset", action="store_true")
@@ -295,6 +313,15 @@ def main() -> None:
 
     data_root.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    needs_kaggle = args.download_dataset or args.download_kaggle_output or args.save_kaggle_token_only
+    if needs_kaggle:
+        step("kaggle_auth", lambda: require_kaggle_auth(args))
+    if args.save_kaggle_token_only:
+        status["finished"] = timestamp()
+        write_status(output_dir, status)
+        print("\nKaggle token setup complete.")
+        return
 
     if args.install_deps:
         step("install_dependencies", install_dependencies)

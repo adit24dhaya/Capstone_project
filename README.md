@@ -154,7 +154,7 @@ cd ~/Capstone_project
 python tools/bootstrap_nautilus.py
 ```
 
-The script expects Kaggle authentication in one of these locations:
+If Kaggle authentication is missing, the script asks for your access token at the start and saves it to `~/.kaggle/access_token` with private permissions. You can also create the token file yourself before running:
 
 ```bash
 mkdir -p ~/.kaggle
@@ -163,7 +163,13 @@ nano ~/.kaggle/access_token
 chmod 600 ~/.kaggle/access_token
 ```
 
-Or, for a one-session token without writing the command into shell history:
+Or save the current token first and exit:
+
+```bash
+python tools/bootstrap_nautilus.py --save-kaggle-token-only
+```
+
+For a one-session token without writing the command into shell history:
 
 ```bash
 read -s KAGGLE_API_TOKEN
