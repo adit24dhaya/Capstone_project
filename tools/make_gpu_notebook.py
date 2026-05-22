@@ -1,3 +1,12 @@
+"""STALE: legacy generator for the initial project.ipynb.
+
+The notebook (project.ipynb) is now hand-edited and is the source of truth.
+Running this script will OVERWRITE manual notebook fixes (e.g., the synthetic
+augmentation bbox tracking, CSV path corrections, Cell 21 cleanup). Do not run
+it unless you have explicitly synced any required changes into the inline
+strings below.
+"""
+
 import json
 from pathlib import Path
 
