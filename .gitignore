@@ -18,6 +18,7 @@ data/
 kaggle_output/
 kaggle_logs/
 kaggle_cli_output/
+local_artifacts/
 outputs/
 logs/
 backups/

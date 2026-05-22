@@ -1,0 +1,9 @@
+{
+  "generated_from": {
+    "kaggle_v16": "kaggle_cli_output/version16_artifacts",
+    "yolo11m_960_artifact": "local_artifacts/yolo11m_960_publication_outputs_20260522_061024"
+  },
+  "primary_completed_result": "YOLO11m 960 test mAP50-95 0.5347",
+  "target_venue": "ESCS'26",
+  "deadline": "2026-05-27"
+}

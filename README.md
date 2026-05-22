@@ -24,7 +24,9 @@ This project implements an end-to-end PCB defect detection workflow aligned with
 - `tools/make_gpu_notebook.py` - generator for rebuilding the Kaggle notebook.
 - `tools/run_nautilus_experiments.py` - portable Nautilus/Kubernetes runner for publication experiments.
 - `tools/bootstrap_nautilus.py` - repeatable Nautilus Jupyter reset recovery script.
+- `tools/build_publication_package.py` - builds lightweight ESCS paper tables and writing notes from saved artifacts.
 - `k8s/` - Nautilus Kubernetes Job templates for long GPU runs.
+- `reports/publication/` - paper-ready summaries, result tables, and final experiment checklist.
 - `PROJECT_ALIGNMENT.md` - mapping between proposal requirements and implementation.
 
 ## Dataset
@@ -203,3 +205,13 @@ The bootstrap writes its status to `~/outputs/nautilus/bootstrap_status.json`.
 ## Security Note
 
 Do not commit Kaggle credentials or API tokens. This repository ignores common credential filenames.
+
+## Publication Package
+
+After downloading local experiment artifacts, regenerate the paper-ready summaries with:
+
+```bash
+python tools/build_publication_package.py
+```
+
+The generated lightweight files live in `reports/publication/`. Large artifacts and model weights should stay in `local_artifacts/`, which is ignored by git.

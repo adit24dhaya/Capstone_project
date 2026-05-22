@@ -1,0 +1,8 @@
+model,family,source,split,precision,recall,mAP50,mAP50_95,inference_ms,fp_per_image,notes
+Adaptive defect-aware YOLO11s + RT-DETR-L,Adaptive validation-calibrated CNN-Transformer fusion,Kaggle v16 adaptive fusion,test,0.8495,0.9030,0.8653,0.4934,,0.4016,"Fusion result used for novelty discussion, not the highest-accuracy row"
+Hybrid YOLO11s + RT-DETR-L,YOLO-Transformer tuned late fusion,Kaggle v16 final analysis,test,0.9054,0.8571,0.8289,0.4766,,0.2224,Final Kaggle detector comparison row
+Hybrid YOLO11s + RT-DETR-L (balanced),CNN-Transformer WBF hybrid,Kaggle v16 final balanced WBF,test,0.7568,0.9427,0.9032,0.5089,,0.8524,"Fusion result used for novelty discussion, not the highest-accuracy row"
+RT-DETR-L,Transformer-style detector,Kaggle v16 final analysis,test,0.8870,0.8510,0.8883,0.4770,19.0,,Final Kaggle detector comparison row
+YOLO11m 960,CNN / YOLO stronger baseline,Nautilus RTX 2080 Ti run,test,0.9819,0.9648,0.9787,0.5347,18.3,,"imgsz=960, batch=2, early stopped at 51 epochs, best.pt used"
+YOLO11s,CNN / YOLO baseline,Kaggle v16 final analysis,test,0.8909,0.8611,0.9054,0.5068,19.0,,Final Kaggle detector comparison row
+YOLO11m 960,CNN / YOLO stronger baseline,Nautilus RTX 2080 Ti run,val,0.9737,0.9487,0.9668,0.5325,,,"imgsz=960, batch=2, early stopped at 51 epochs, best.pt used"
