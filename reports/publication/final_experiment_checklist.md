@@ -7,13 +7,41 @@
 - Hybrid YOLO11s + RT-DETR-L fusion experiments from Kaggle v16.
 - Adaptive defect-aware fusion, defect-size, calibration, robustness, and inspection-cost artifacts from Kaggle v16.
 - YOLO11m 960 Nautilus/RTX 2080 Ti result with saved `best.pt`, logs, curves, and metrics.
+- YOLO11l 1280 Nautilus/RTX 2080 Ti result in `local_artifacts/yolo11l_1280_publication_outputs_20260522_092005/`.
+- YOLO11l 1280 ONNX export in `local_artifacts/yolo11l_1280_onnx_export_20260522_102315/`.
+- Six selected prediction examples in `local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples/`.
 
 ## Still Worth Running
 
 1. Faster R-CNN baseline on the current split.
-2. Optional YOLO11m 960 ONNX export for deployment evidence.
-3. Optional final visualization set using YOLO11m 960 predictions.
-4. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
+2. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
+3. Optional YOLO11l fine-tune only if more time/GPU is available.
+
+## Repeatable Export Command
+
+```bash
+python tools/run_nautilus_experiments.py \
+  --experiment detector_export \
+  --data-root ~/data \
+  --output-dir ~/outputs/nautilus \
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \
+  --imgsz 1280 \
+  --export-format onnx
+```
+
+## Repeatable Visual Examples Command
+
+```bash
+python tools/run_nautilus_experiments.py \
+  --experiment visual_examples \
+  --data-root ~/data \
+  --output-dir ~/outputs/nautilus \
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \
+  --run-name yolo11l_1280_selected_examples \
+  --imgsz 1280 \
+  --split test \
+  --prediction-save-limit 6
+```
 
 ## Faster R-CNN Command
 
@@ -45,4 +73,4 @@ exit $EXIT_CODE
 
 ## Paper Priority
 
-Start writing now using YOLO11m 960 as the main model and fusion/cost analysis as the novelty layer. Treat Faster R-CNN and cross-dataset results as additions if they finish before submission.
+Start writing now using YOLO11l @ 1280 as the main detector. Use YOLO11m-960 and Kaggle fusion as ablations. Treat Faster R-CNN and cross-dataset as optional before ESCS (May 27).

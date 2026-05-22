@@ -15,6 +15,20 @@ REPORT_DIR = ROOT / "reports" / "publication"
 KAGGLE_V16 = ROOT / "kaggle_cli_output" / "version16_artifacts"
 YOLO11M_ARTIFACT = ROOT / "local_artifacts" / "yolo11m_960_publication_outputs_20260522_061024"
 YOLO11M_RUN = YOLO11M_ARTIFACT / "outputs" / "nautilus" / "runs" / "detector_train" / "yolo11m_960_publication"
+YOLO11L_ARTIFACT = ROOT / "local_artifacts" / "yolo11l_1280_publication_outputs_20260522_092005"
+YOLO11L_RUN = YOLO11L_ARTIFACT / "outputs" / "nautilus" / "runs" / "detector_train" / "yolo11l_1280_publication"
+YOLO11L_ONNX_ARTIFACT = ROOT / "local_artifacts" / "yolo11l_1280_onnx_export_20260522_102315"
+YOLO11L_ONNX = (
+    YOLO11L_ONNX_ARTIFACT
+    / "outputs"
+    / "nautilus"
+    / "runs"
+    / "detector_train"
+    / "yolo11l_1280_publication"
+    / "weights"
+    / "best.onnx"
+)
+YOLO11L_SELECTED_FIGURES = ROOT / "local_artifacts" / "outputs" / "nautilus" / "runs" / "paper_figures" / "yolo11l_1280_selected_examples"
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -48,8 +62,7 @@ def find_row(rows: list[dict[str, str]], **criteria: str) -> dict[str, str] | No
     return None
 
 
-def parse_yolo11m_test_speed() -> str:
-    log_path = YOLO11M_ARTIFACT / "logs" / "yolo11m_960_publication_overnight.log"
+def parse_inference_ms(log_path: Path) -> str:
     if not log_path.exists():
         return ""
     text = log_path.read_text(encoding="utf-8", errors="ignore")
@@ -57,16 +70,23 @@ def parse_yolo11m_test_speed() -> str:
     return speeds[-1] if speeds else ""
 
 
-def load_yolo11m_rows() -> list[dict[str, Any]]:
-    metrics = read_csv(YOLO11M_RUN / "detector_train_metrics.csv")
-    speed_ms = parse_yolo11m_test_speed()
+def load_nautilus_detector_rows(
+    *,
+    model_label: str,
+    family: str,
+    run_dir: Path,
+    log_path: Path,
+    notes: str,
+) -> list[dict[str, Any]]:
+    metrics = read_csv(run_dir / "detector_train_metrics.csv")
+    speed_ms = parse_inference_ms(log_path)
     rows = []
     for row in metrics:
         rows.append(
             {
-                "model": "YOLO11m 960",
-                "family": "CNN / YOLO stronger baseline",
-                "source": "Nautilus RTX 2080 Ti run",
+                "model": model_label,
+                "family": family,
+                "source": f"Nautilus RTX 2080 Ti {run_dir.name}",
                 "split": row["split"],
                 "precision": f(row["precision"]),
                 "recall": f(row["recall"]),
@@ -74,10 +94,34 @@ def load_yolo11m_rows() -> list[dict[str, Any]]:
                 "mAP50_95": f(row["mAP50_95"]),
                 "inference_ms": f(speed_ms, 1) if row["split"] == "test" else "",
                 "fp_per_image": "",
-                "notes": "imgsz=960, batch=2, early stopped at 51 epochs, best.pt used",
+                "notes": notes,
             }
         )
     return rows
+
+
+def load_yolo11l_rows() -> list[dict[str, Any]]:
+    if not YOLO11L_RUN.exists():
+        return []
+    return load_nautilus_detector_rows(
+        model_label="YOLO11l 1280",
+        family="CNN / YOLO primary detector",
+        run_dir=YOLO11L_RUN,
+        log_path=YOLO11L_ARTIFACT / "logs" / "yolo11l_1280_publication_overnight.log",
+        notes="imgsz=1280, batch=1, workers=0, best.pt official val+test",
+    )
+
+
+def load_yolo11m_rows() -> list[dict[str, Any]]:
+    if not YOLO11M_RUN.exists():
+        return []
+    return load_nautilus_detector_rows(
+        model_label="YOLO11m 960",
+        family="CNN / YOLO medium-resolution ablation",
+        run_dir=YOLO11M_RUN,
+        log_path=YOLO11M_ARTIFACT / "logs" / "yolo11m_960_publication_overnight.log",
+        notes="imgsz=960, batch=2, early stopped, best.pt used",
+    )
 
 
 def load_comparison_rows() -> list[dict[str, Any]]:
@@ -128,13 +172,14 @@ def load_comparison_rows() -> list[dict[str, Any]]:
             }
         )
 
+    rows.extend(load_yolo11l_rows())
     rows.extend(load_yolo11m_rows())
-    rows.sort(key=lambda item: (item["split"] != "test", item["model"]))
+    rows.sort(key=lambda item: (item["split"] != "test", -float(item["mAP50_95"] or 0), item["model"]))
     return rows
 
 
-def best_yolo11m_epoch() -> dict[str, str] | None:
-    rows = read_csv(YOLO11M_RUN / "results.csv")
+def best_training_epoch(run_dir: Path) -> dict[str, str] | None:
+    rows = read_csv(run_dir / "results.csv")
     if not rows:
         return None
     metric_key = "metrics/mAP50-95(B)"
@@ -147,9 +192,15 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
         key=lambda row: float(row["mAP50_95"]),
     )
     yolo11s = next(row for row in comparison_rows if row["model"] == "YOLO11s" and row["split"] == "test")
-    yolo11m = next(row for row in comparison_rows if row["model"] == "YOLO11m 960" and row["split"] == "test")
-    delta = float(yolo11m["mAP50_95"]) - float(yolo11s["mAP50_95"])
-    best_epoch = best_yolo11m_epoch()
+    yolo11m = next(
+        (row for row in comparison_rows if row["model"] == "YOLO11m 960" and row["split"] == "test"),
+        None,
+    )
+    delta_vs_yolo11s = float(best_row["mAP50_95"]) - float(yolo11s["mAP50_95"])
+    delta_vs_yolo11m = (
+        float(best_row["mAP50_95"]) - float(yolo11m["mAP50_95"]) if yolo11m else None
+    )
+    best_epoch = best_training_epoch(YOLO11L_RUN if "YOLO11l" in best_row["model"] else YOLO11M_RUN)
 
     lines = [
         "# ESCS'26 Publication Results Summary",
@@ -163,24 +214,33 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
         ),
         "",
         (
-            "Compared with the Kaggle YOLO11s baseline, YOLO11m 960 improves "
-            f"test mAP50-95 from `{yolo11s['mAP50_95']}` to `{yolo11m['mAP50_95']}` "
-            f"for an absolute gain of `{delta:.4f}`."
+            f"Compared with the Kaggle YOLO11s baseline (test mAP50-95 `{yolo11s['mAP50_95']}`), "
+            f"the gain is `{delta_vs_yolo11s:.4f}` absolute."
         ),
+    ]
+    if yolo11m and delta_vs_yolo11m is not None:
+        lines.append(
+            (
+                f"Compared with YOLO11m-960 (test mAP50-95 `{yolo11m['mAP50_95']}`), "
+                f"the gain is `{delta_vs_yolo11m:.4f}` absolute."
+            )
+        )
+    lines.extend(
+        [
         "",
         "## Paper Claim To Use",
         "",
         (
-            "A medium YOLO detector trained at 960-pixel resolution improves PCB defect "
-            "detection accuracy while remaining real-time on a commodity RTX 2080 Ti-class GPU. "
-            "The broader system adds transformer-style and adaptive fusion experiments for "
-            "embedded inspection tradeoff analysis."
+            "A large YOLO detector at 1280px achieves strong six-class PCB defect detection "
+            "on a commodity RTX 2080 Ti (test mAP50 near 0.99, mAP50-95 near 0.58). "
+            "YOLO11m-960 and Kaggle fusion experiments support ablation and deployment tradeoffs."
         ),
         "",
-        "## YOLO11m 960 Training Note",
+        f"## {best_row['model']} Training Note",
         "",
-        "The Nautilus run used `imgsz=960`, `batch=2`, `workers=0`, and early stopped after 51 epochs.",
-    ]
+        "Nautilus RTX 2080 Ti; see `results.csv` and overnight log in local artifact backup.",
+        ]
+    )
     if best_epoch:
         lines.extend(
             [
@@ -196,15 +256,19 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
             "## Important Caveat",
             "",
             (
-                "Kaggle v16 and Nautilus YOLO11m runs were executed on different GPU environments. "
+                "Kaggle v16 and Nautilus YOLO11 runs were executed on different GPU environments. "
                 "Use accuracy metrics for model comparison, and discuss latency as hardware-specific."
             ),
             "",
             "## Evidence Files",
             "",
             "- `reports/publication/model_comparison.csv`",
+            "- `reports/publication/yolo11l_1280_training_summary.csv`",
             "- `reports/publication/yolo11m_960_training_summary.csv`",
-            "- Local artifact backup: `local_artifacts/yolo11m_960_publication_outputs_20260522_061024/`",
+            f"- Local artifact backup: `{YOLO11L_ARTIFACT.relative_to(ROOT)}/`",
+            f"- ONNX deployment artifact: `{YOLO11L_ONNX.relative_to(ROOT)}`" if YOLO11L_ONNX.exists() else "- ONNX deployment artifact: pending",
+            f"- Selected prediction figures: `{YOLO11L_SELECTED_FIGURES.relative_to(ROOT)}/`" if YOLO11L_SELECTED_FIGURES.exists() else "- Selected prediction figures: pending",
+            f"- Prior ablation: `{YOLO11M_ARTIFACT.relative_to(ROOT)}/`",
         ]
     )
     (REPORT_DIR / "results_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -218,7 +282,7 @@ Cost-Aware Adaptive Detector Fusion for Real-Time Embedded PCB Defect Inspection
 
 ## Abstract
 
-Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 960, RT-DETR, Faster R-CNN baseline, adaptive fusion, real-time latency, and inspection-cost metrics.
+Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58). Mention RTX 2080 Ti, YOLO11m-960 ablation, optional RT-DETR/fusion/cost analysis.
 
 ## 1. Introduction
 
@@ -226,7 +290,7 @@ Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 
 - False negatives are costly because missed defects can propagate downstream.
 - Embedded deployment requires balancing accuracy, latency, and inspection burden.
 - Contribution summary:
-  - Strong YOLO11m 960 real-time detector baseline.
+  - Strong YOLO11l 1280 detector as primary result; YOLO11m-960 as efficiency ablation.
   - Comparison against YOLO11s, RT-DETR-L, and fusion variants.
   - Cost-aware and adaptive fusion analysis for industrial inspection.
   - Deployment-oriented discussion with ONNX/TensorRT readiness.
@@ -242,7 +306,7 @@ Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 
 
 - Dataset and six-class taxonomy.
 - YOLO conversion and train/val/test split.
-- Detector baselines: YOLO11s, YOLO11m 960, RT-DETR-L, Faster R-CNN.
+- Detector baselines: YOLO11l 1280 (primary), YOLO11s, YOLO11m 960, RT-DETR-L, Faster R-CNN (optional).
 - Adaptive fusion policy and inspection-cost metric.
 - Evaluation metrics: precision, recall, mAP50, mAP50-95, FP/image, latency.
 
@@ -251,12 +315,12 @@ Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 
 - Hardware and environment table.
 - Training settings table.
 - Model comparison table from `model_comparison.csv`.
-- Per-class table for YOLO11m 960 and fusion models.
+- Per-class table for YOLO11l 1280 and fusion models.
 - Latency and deployment analysis.
 
 ## 5. Results and Discussion
 
-- YOLO11m 960 is the strongest current accuracy result.
+- YOLO11l 1280 is the strongest current accuracy result.
 - Fusion improves the precision/recall tradeoff discussion but is not always the highest mAP model.
 - Missing_hole remains easiest; Short/Spur localization is harder under stricter mAP50-95.
 - Discuss 2080 Ti feasibility and why A100 is requested for final high-resolution ablations.
@@ -284,13 +348,41 @@ def write_checklist() -> None:
 - Hybrid YOLO11s + RT-DETR-L fusion experiments from Kaggle v16.
 - Adaptive defect-aware fusion, defect-size, calibration, robustness, and inspection-cost artifacts from Kaggle v16.
 - YOLO11m 960 Nautilus/RTX 2080 Ti result with saved `best.pt`, logs, curves, and metrics.
+- YOLO11l 1280 Nautilus/RTX 2080 Ti result in `local_artifacts/yolo11l_1280_publication_outputs_20260522_092005/`.
+- YOLO11l 1280 ONNX export in `local_artifacts/yolo11l_1280_onnx_export_20260522_102315/`.
+- Six selected prediction examples in `local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples/`.
 
 ## Still Worth Running
 
 1. Faster R-CNN baseline on the current split.
-2. Optional YOLO11m 960 ONNX export for deployment evidence.
-3. Optional final visualization set using YOLO11m 960 predictions.
-4. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
+2. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
+3. Optional YOLO11l fine-tune only if more time/GPU is available.
+
+## Repeatable Export Command
+
+```bash
+python tools/run_nautilus_experiments.py \\
+  --experiment detector_export \\
+  --data-root ~/data \\
+  --output-dir ~/outputs/nautilus \\
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \\
+  --imgsz 1280 \\
+  --export-format onnx
+```
+
+## Repeatable Visual Examples Command
+
+```bash
+python tools/run_nautilus_experiments.py \\
+  --experiment visual_examples \\
+  --data-root ~/data \\
+  --output-dir ~/outputs/nautilus \\
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \\
+  --run-name yolo11l_1280_selected_examples \\
+  --imgsz 1280 \\
+  --split test \\
+  --prediction-save-limit 6
+```
 
 ## Faster R-CNN Command
 
@@ -322,13 +414,13 @@ exit $EXIT_CODE
 
 ## Paper Priority
 
-Start writing now using YOLO11m 960 as the main model and fusion/cost analysis as the novelty layer. Treat Faster R-CNN and cross-dataset results as additions if they finish before submission.
+Start writing now using YOLO11l @ 1280 as the main detector. Use YOLO11m-960 and Kaggle fusion as ablations. Treat Faster R-CNN and cross-dataset as optional before ESCS (May 27).
 """
     (REPORT_DIR / "final_experiment_checklist.md").write_text(checklist, encoding="utf-8")
 
 
-def write_training_summary() -> None:
-    rows = read_csv(YOLO11M_RUN / "results.csv")
+def write_training_summary(run_dir: Path, output_name: str) -> None:
+    rows = read_csv(run_dir / "results.csv")
     if not rows:
         return
     fieldnames = [
@@ -355,7 +447,7 @@ def write_training_summary() -> None:
                 "mAP50_95": f(row.get("metrics/mAP50-95(B)")),
             }
         )
-    write_csv(REPORT_DIR / "yolo11m_960_training_summary.csv", compact, fieldnames)
+    write_csv(REPORT_DIR / output_name, compact, fieldnames)
 
 
 def write_metadata() -> None:
@@ -363,8 +455,12 @@ def write_metadata() -> None:
         "generated_from": {
             "kaggle_v16": str(KAGGLE_V16.relative_to(ROOT)),
             "yolo11m_960_artifact": str(YOLO11M_ARTIFACT.relative_to(ROOT)),
+            "yolo11l_1280_artifact": str(YOLO11L_ARTIFACT.relative_to(ROOT)),
+            "yolo11l_1280_onnx_artifact": str(YOLO11L_ONNX_ARTIFACT.relative_to(ROOT)),
+            "yolo11l_1280_selected_figures": str(YOLO11L_SELECTED_FIGURES.relative_to(ROOT)),
         },
-        "primary_completed_result": "YOLO11m 960 test mAP50-95 0.5347",
+        "primary_completed_result": "YOLO11l 1280 test mAP50-95 0.5769",
+        "previous_headline": "YOLO11m 960 test mAP50-95 0.5347",
         "target_venue": "ESCS'26",
         "deadline": "2026-05-27",
     }
@@ -388,7 +484,10 @@ def main() -> None:
         "notes",
     ]
     write_csv(REPORT_DIR / "model_comparison.csv", comparison_rows, fieldnames)
-    write_training_summary()
+    if YOLO11L_RUN.exists():
+        write_training_summary(YOLO11L_RUN, "yolo11l_1280_training_summary.csv")
+    if YOLO11M_RUN.exists():
+        write_training_summary(YOLO11M_RUN, "yolo11m_960_training_summary.csv")
     write_results_markdown(comparison_rows)
     write_outline()
     write_checklist()

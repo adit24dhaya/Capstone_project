@@ -110,13 +110,13 @@ After a successful Kaggle run, the important generated files are expected in `/k
 
 The capstone notebook remains the stable final workflow. For publication work, use the Nautilus runner to add stronger baselines and generalization evidence.
 
-Recommended next experiments:
+Recommended publication experiments:
 
-1. Train stronger YOLO baselines: `YOLO11m` and, on larger GPUs, `YOLO11l`.
-2. Evaluate stronger transformer baselines such as `RT-DETR-X` when GPU memory allows.
-3. Keep Faster R-CNN as a two-stage high-recall baseline.
-4. Convert external COCO-style datasets such as DsPCBSD+ into the six-class project taxonomy.
-5. Run defect-size, calibration, and industrial FP/FN cost analyses.
+1. Train the primary high-resolution detector: `YOLO11l` at `imgsz=1280`.
+2. Export the best checkpoint to ONNX for deployment evidence.
+3. Save class-balanced prediction examples for paper figures.
+4. Keep Faster R-CNN as a two-stage high-recall baseline.
+5. Convert external COCO-style datasets such as DsPCBSD+ into the six-class project taxonomy if time allows.
 6. Run adaptive defect-aware fusion when both YOLO and RT-DETR weights are available.
 
 Example Nautilus commands:
@@ -126,21 +126,40 @@ python tools/run_nautilus_experiments.py \
   --experiment detector_train \
   --data-root ~/data \
   --output-dir ~/outputs/nautilus \
-  --yolo-model yolo11m.pt \
-  --run-name yolo11m_publication \
+  --yolo-model yolo11l.pt \
+  --run-name yolo11l_1280_publication \
   --imgsz 1280 \
-  --batch 4 \
+  --batch 1 \
   --epochs 100 \
-  --workers 0
+  --workers 0 \
+  --patience 20
 
 python tools/run_nautilus_experiments.py \
   --experiment detector_eval \
   --data-root ~/data \
   --output-dir ~/outputs/nautilus \
-  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11m_publication/weights/best.pt \
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \
   --imgsz 1280 \
   --split test \
   --workers 0
+
+python tools/run_nautilus_experiments.py \
+  --experiment detector_export \
+  --data-root ~/data \
+  --output-dir ~/outputs/nautilus \
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \
+  --imgsz 1280 \
+  --export-format onnx
+
+python tools/run_nautilus_experiments.py \
+  --experiment visual_examples \
+  --data-root ~/data \
+  --output-dir ~/outputs/nautilus \
+  --yolo-weights ~/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt \
+  --run-name yolo11l_1280_selected_examples \
+  --imgsz 1280 \
+  --split test \
+  --prediction-save-limit 6
 ```
 
 For long runs, prefer Kubernetes Jobs from `k8s/` rather than browser-based `nohup`.
@@ -185,19 +204,19 @@ To also download the latest Kaggle notebook outputs after the reset:
 python tools/bootstrap_nautilus.py --download-kaggle-output
 ```
 
-To start the YOLO11m publication run in the background after recovery:
+To start the YOLO11l publication run in the background after recovery:
 
 ```bash
 python tools/bootstrap_nautilus.py \
   --start-detector-train \
-  --yolo-model yolo11m.pt \
-  --run-name yolo11m_publication \
+  --yolo-model yolo11l.pt \
+  --run-name yolo11l_1280_publication \
   --imgsz 1280 \
-  --batch 2 \
+  --batch 1 \
   --epochs 100 \
   --workers 0
 
-tail -f ~/logs/yolo11m_publication.log
+tail -f ~/logs/yolo11l_1280_publication.log
 ```
 
 The bootstrap writes its status to `~/outputs/nautilus/bootstrap_status.json`.

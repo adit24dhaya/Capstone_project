@@ -1092,6 +1092,128 @@ def run_detector_eval(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2))
 
 
+def run_detector_export(args: argparse.Namespace) -> None:
+    """Export a trained Ultralytics detector and record deployment metadata."""
+    from ultralytics import YOLO
+
+    output_dir = expand_path(args.output_dir)
+    weights = expand_path(args.yolo_weights)
+    export_dir = output_dir / "runs" / "detector_export" / weights.parent.parent.name
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    model = YOLO(str(weights))
+    exported = Path(
+        model.export(
+            format=args.export_format,
+            imgsz=args.imgsz,
+            device=args.device,
+            simplify=args.export_simplify,
+            dynamic=args.export_dynamic,
+        )
+    )
+    copied = export_dir / exported.name
+    if exported.exists() and exported.resolve() != copied.resolve():
+        shutil.copy2(exported, copied)
+
+    summary = {
+        "weights": str(weights),
+        "export_format": args.export_format,
+        "imgsz": args.imgsz,
+        "device": args.device,
+        "simplify": args.export_simplify,
+        "dynamic": args.export_dynamic,
+        "exported_path": str(exported),
+        "packaged_path": str(copied),
+        "bytes": copied.stat().st_size if copied.exists() else exported.stat().st_size if exported.exists() else None,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    write_text(export_dir / "detector_export_summary.json", json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
+def select_visual_example_items(items: list[dict], limit: int) -> list[dict]:
+    """Choose a compact, class-balanced set of images for paper figures."""
+    selected: list[dict] = []
+    seen_paths: set[Path] = set()
+    for class_id in range(len(CLASS_NAMES)):
+        candidates = [item for item in items if class_id in item["labels"]]
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (len(item["labels"]), item["image_path"].name))
+        chosen = candidates[0]
+        selected.append(chosen)
+        seen_paths.add(chosen["image_path"])
+        if len(selected) >= limit:
+            return selected
+
+    for item in items:
+        if item["image_path"] in seen_paths:
+            continue
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def run_visual_examples(args: argparse.Namespace) -> None:
+    """Save a small, repeatable set of prediction images for papers/slides."""
+    from ultralytics import YOLO
+
+    output_dir = expand_path(args.output_dir)
+    if args.external_data_yaml:
+        items = load_yolo_items_from_data_yaml(expand_path(args.external_data_yaml), args.split)
+    else:
+        summary = load_conversion_summary(args)
+        items = load_yolo_dataset_items(Path(summary["yolo_root"]), args.split)
+
+    selected = select_visual_example_items(items, args.prediction_save_limit)
+    if not selected:
+        raise SystemExit(f"No images found for split {args.split!r}")
+
+    run_name = args.run_name or f"{Path(args.yolo_weights).stem}_{args.split}_examples"
+    project = output_dir / "runs" / "visual_examples"
+    model = YOLO(str(expand_path(args.yolo_weights)))
+    model.predict(
+        source=[str(item["image_path"]) for item in selected],
+        imgsz=args.imgsz,
+        conf=args.eval_conf,
+        save=True,
+        save_txt=True,
+        save_conf=True,
+        project=str(project),
+        name=run_name,
+        exist_ok=True,
+        device=args.device,
+    )
+
+    run_dir = project / run_name
+    manifest_rows = []
+    for item in selected:
+        class_names = [CLASS_NAMES[label] for label in sorted(set(item["labels"]))]
+        manifest_rows.append(
+            {
+                "image": str(item["image_path"]),
+                "saved_prediction": str(run_dir / item["image_path"].name),
+                "classes": ";".join(class_names),
+                "boxes": len(item["boxes"]),
+                "width": item["width"],
+                "height": item["height"],
+            }
+        )
+    write_csv(run_dir / "visual_examples_manifest.csv", manifest_rows)
+    summary = {
+        "weights": str(expand_path(args.yolo_weights)),
+        "split": args.split,
+        "imgsz": args.imgsz,
+        "conf": args.eval_conf,
+        "examples": len(manifest_rows),
+        "run_dir": str(run_dir),
+        "manifest": str(run_dir / "visual_examples_manifest.csv"),
+    }
+    write_text(run_dir / "visual_examples_summary.json", json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
 def wbf_fuse_image(
     yolo_pred: dict,
     transformer_pred: dict,
@@ -1570,6 +1692,8 @@ def build_parser() -> argparse.ArgumentParser:
             "yolo_smoke",
             "detector_train",
             "detector_eval",
+            "detector_export",
+            "visual_examples",
             "faster_rcnn",
             "cross_dataset",
             "segmentation_pilot",
@@ -1611,6 +1735,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-data-yaml", default=None)
     parser.add_argument("--yolo-weights", default="yolo11n.pt")
     parser.add_argument("--rtdetr-weights", default=None)
+    parser.add_argument("--export-format", default="onnx")
+    parser.add_argument("--export-simplify", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--export-dynamic", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--coco-root", default=None)
     parser.add_argument("--dataset-name", default="dspcbsd")
     parser.add_argument("--coco-class-map", default=None, help="JSON mapping from external category names to project class names.")
@@ -1628,6 +1755,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         run_detector_train(args)
     elif args.experiment == "detector_eval":
         run_detector_eval(args)
+    elif args.experiment == "detector_export":
+        run_detector_export(args)
+    elif args.experiment == "visual_examples":
+        run_visual_examples(args)
     elif args.experiment == "faster_rcnn":
         run_faster_rcnn(args)
     elif args.experiment == "cross_dataset":

@@ -5,7 +5,7 @@ Cost-Aware Adaptive Detector Fusion for Real-Time Embedded PCB Defect Inspection
 
 ## Abstract
 
-Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 960, RT-DETR, Faster R-CNN baseline, adaptive fusion, real-time latency, and inspection-cost metrics.
+Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58). Mention RTX 2080 Ti, YOLO11m-960 ablation, optional RT-DETR/fusion/cost analysis.
 
 ## 1. Introduction
 
@@ -13,7 +13,7 @@ Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 
 - False negatives are costly because missed defects can propagate downstream.
 - Embedded deployment requires balancing accuracy, latency, and inspection burden.
 - Contribution summary:
-  - Strong YOLO11m 960 real-time detector baseline.
+  - Strong YOLO11l 1280 detector as primary result; YOLO11m-960 as efficiency ablation.
   - Comparison against YOLO11s, RT-DETR-L, and fusion variants.
   - Cost-aware and adaptive fusion analysis for industrial inspection.
   - Deployment-oriented discussion with ONNX/TensorRT readiness.
@@ -29,7 +29,7 @@ Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 
 
 - Dataset and six-class taxonomy.
 - YOLO conversion and train/val/test split.
-- Detector baselines: YOLO11s, YOLO11m 960, RT-DETR-L, Faster R-CNN.
+- Detector baselines: YOLO11l 1280 (primary), YOLO11s, YOLO11m 960, RT-DETR-L, Faster R-CNN (optional).
 - Adaptive fusion policy and inspection-cost metric.
 - Evaluation metrics: precision, recall, mAP50, mAP50-95, FP/image, latency.
 
@@ -38,12 +38,12 @@ Write 100-120 words. Mention PCB defect detection, embedded inspection, YOLO11m 
 - Hardware and environment table.
 - Training settings table.
 - Model comparison table from `model_comparison.csv`.
-- Per-class table for YOLO11m 960 and fusion models.
+- Per-class table for YOLO11l 1280 and fusion models.
 - Latency and deployment analysis.
 
 ## 5. Results and Discussion
 
-- YOLO11m 960 is the strongest current accuracy result.
+- YOLO11l 1280 is the strongest current accuracy result.
 - Fusion improves the precision/recall tradeoff discussion but is not always the highest mAP model.
 - Missing_hole remains easiest; Short/Spur localization is harder under stricter mAP50-95.
 - Discuss 2080 Ti feasibility and why A100 is requested for final high-resolution ablations.
