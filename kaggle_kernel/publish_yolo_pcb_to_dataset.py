@@ -66,7 +66,7 @@ def build_zip_from_root(root: Path) -> Path:
             ["Missing_hole", "Mouse_bite", "Open_circuit", "Short", "Spur", "Spurious_copper"]
         )
     )
-    staging = WORK / "YOLO_PCB_staging"
+    staging = WORK / "YOLO_PCB"
     if staging.exists():
         shutil.rmtree(staging)
     shutil.copytree(root, staging)
@@ -121,13 +121,46 @@ else:
 size_mb = ZIP_PATH.stat().st_size / (1024 * 1024)
 print(f"Ready to publish: {ZIP_PATH} ({size_mb:.1f} MiB)")
 
-# --- publish to Kaggle Dataset (needs API secrets) ---
+# --- publish to Kaggle Dataset (Kaggle API credentials) ---
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle"])
-from kaggle_secrets import UserSecretsClient
 
-secrets = UserSecretsClient()
-os.environ["KAGGLE_USERNAME"] = secrets.get_secret("KAGGLE_USERNAME")
-os.environ["KAGGLE_KEY"] = secrets.get_secret("KAGGLE_KEY")
+
+def load_kaggle_credentials() -> None:
+    if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
+        return
+    try:
+        from kaggle_secrets import UserSecretsClient
+
+        secrets = UserSecretsClient()
+        os.environ["KAGGLE_USERNAME"] = secrets.get_secret("KAGGLE_USERNAME")
+        os.environ["KAGGLE_KEY"] = secrets.get_secret("KAGGLE_KEY")
+        return
+    except Exception as exc:
+        print("Notebook Secrets not set:", exc)
+
+    kaggle_json = Path("/kaggle/input/kaggle-json/kaggle.json")
+    if kaggle_json.exists():
+        cfg = json.loads(kaggle_json.read_text())
+        os.environ["KAGGLE_USERNAME"] = cfg["username"]
+        os.environ["KAGGLE_KEY"] = cfg["key"]
+        print("Loaded credentials from /kaggle/input/kaggle-json/kaggle.json")
+        return
+
+    import getpass
+
+    print(
+        "Add Secrets (recommended): Add-ons → Secrets →\n"
+        "  KAGGLE_USERNAME = aditya2402\n"
+        "  KAGGLE_KEY = <from kaggle.com/settings>\n"
+        "Or enter once below (input hidden for key):\n"
+    )
+    os.environ["KAGGLE_USERNAME"] = input("KAGGLE_USERNAME [aditya2402]: ").strip() or "aditya2402"
+    os.environ["KAGGLE_KEY"] = getpass.getpass("KAGGLE_KEY: ").strip()
+    if not os.environ["KAGGLE_KEY"]:
+        raise RuntimeError("KAGGLE_KEY is required to publish the dataset.")
+
+
+load_kaggle_credentials()
 
 if META_DIR.exists():
     shutil.rmtree(META_DIR)

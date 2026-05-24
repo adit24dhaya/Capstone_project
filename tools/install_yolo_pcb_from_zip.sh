@@ -14,15 +14,27 @@ mkdir -p "$TMP"
 unzip -q -o "$ZIP" -d "$TMP"
 
 ROOT=""
-if [[ -d "$TMP/YOLO_PCB" ]]; then
-  ROOT="$TMP/YOLO_PCB"
-elif [[ -d "$TMP/train" ]]; then
-  ROOT="$TMP"
-else
+for candidate in \
+  "$TMP/YOLO_PCB" \
+  "$TMP/YOLO_PCB_staging" \
+  "$TMP"; do
+  if [[ -d "$candidate/train/images" ]]; then
+    ROOT="$candidate"
+    break
+  fi
+done
+if [[ -z "$ROOT" ]]; then
+  train_images="$(find "$TMP" -type d -path '*/train/images' 2>/dev/null | head -1 || true)"
+  if [[ -n "$train_images" ]]; then
+    ROOT="${train_images%/train/images}"
+  fi
+fi
+if [[ -z "$ROOT" ]] || [[ ! -d "$ROOT/train/images" ]]; then
   echo "Could not find YOLO_PCB layout in zip. Contents:"
-  find "$TMP" -maxdepth 2 -type d
+  find "$TMP" -maxdepth 3 -type d
   exit 1
 fi
+echo "Using dataset root: $ROOT"
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
