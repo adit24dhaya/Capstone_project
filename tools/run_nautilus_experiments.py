@@ -1027,20 +1027,41 @@ def run_detector_train(args: argparse.Namespace) -> None:
     model = YOLO(args.yolo_model)
     name = args.run_name or Path(args.yolo_model).stem
     train_dir = output_dir / "runs" / "detector_train"
+    train_kwargs = {
+        "data": data_yaml,
+        "imgsz": args.imgsz,
+        "epochs": args.epochs,
+        "batch": args.batch,
+        "device": args.device,
+        "workers": args.workers,
+        "project": str(train_dir),
+        "name": name,
+        "exist_ok": True,
+        "patience": args.patience,
+        "cos_lr": args.cos_lr,
+        "cache": args.cache,
+        "close_mosaic": args.close_mosaic,
+    }
+    optional_train_args = {
+        "optimizer": args.optimizer,
+        "lr0": args.lr0,
+        "lrf": args.lrf,
+        "weight_decay": args.weight_decay,
+        "warmup_epochs": args.warmup_epochs,
+        "mosaic": args.mosaic,
+        "mixup": args.mixup,
+        "copy_paste": args.copy_paste,
+        "degrees": args.degrees,
+        "translate": args.translate,
+        "scale": args.scale,
+        "fliplr": args.fliplr,
+        "erasing": args.erasing,
+        "dropout": args.dropout,
+        "freeze": args.freeze,
+    }
+    train_kwargs.update({key: value for key, value in optional_train_args.items() if value is not None})
     result = model.train(
-        data=data_yaml,
-        imgsz=args.imgsz,
-        epochs=args.epochs,
-        batch=args.batch,
-        device=args.device,
-        workers=args.workers,
-        project=str(train_dir),
-        name=name,
-        exist_ok=True,
-        patience=args.patience,
-        cos_lr=args.cos_lr,
-        cache=args.cache,
-        close_mosaic=args.close_mosaic,
+        **train_kwargs,
     )
     best_weights = train_dir / name / "weights" / "best.pt"
     rows = []
@@ -1719,6 +1740,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--close-mosaic", type=int, default=10)
     parser.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cache", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--optimizer", default=None, help="Optional YOLO optimizer override, e.g. AdamW, SGD, auto.")
+    parser.add_argument("--lr0", type=float, default=None, help="Optional YOLO initial learning rate override.")
+    parser.add_argument("--lrf", type=float, default=None, help="Optional YOLO final LR fraction override.")
+    parser.add_argument("--weight-decay", type=float, default=None, help="Optional YOLO weight decay override.")
+    parser.add_argument("--warmup-epochs", type=float, default=None, help="Optional YOLO warmup epoch override.")
+    parser.add_argument("--mosaic", type=float, default=None, help="Optional YOLO mosaic augmentation probability.")
+    parser.add_argument("--mixup", type=float, default=None, help="Optional YOLO mixup augmentation probability.")
+    parser.add_argument("--copy-paste", type=float, default=None, help="Optional YOLO copy-paste augmentation probability.")
+    parser.add_argument("--degrees", type=float, default=None, help="Optional YOLO rotation augmentation degrees.")
+    parser.add_argument("--translate", type=float, default=None, help="Optional YOLO translation augmentation fraction.")
+    parser.add_argument("--scale", type=float, default=None, help="Optional YOLO scale augmentation gain.")
+    parser.add_argument("--fliplr", type=float, default=None, help="Optional YOLO horizontal flip probability.")
+    parser.add_argument("--erasing", type=float, default=None, help="Optional YOLO random erasing probability.")
+    parser.add_argument("--dropout", type=float, default=None, help="Optional YOLO dropout probability.")
+    parser.add_argument("--freeze", type=int, default=None, help="Optional number of YOLO layers to freeze.")
     parser.add_argument("--max-train-items", type=int, default=None)
     parser.add_argument("--max-eval-items", type=int, default=None)
     parser.add_argument("--frcnn-epochs", type=int, default=5)

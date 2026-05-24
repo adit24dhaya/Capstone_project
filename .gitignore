@@ -3,6 +3,16 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 
+# Local AI-agent/tooling artifacts
+.serena/
+AGENTS.md
+codex-hooks.json
+codex-mcp-snippet.toml
+repomix.config.json
+repomix-output.*
+graphify-out/
+**/graphify-out/
+
 # Editor / Office temporary files
 ~$*
 *.tmp
