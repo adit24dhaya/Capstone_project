@@ -1,68 +1,146 @@
-# Paste this entire file into ONE Kaggle notebook cell AFTER YOLO_PCB prep finishes.
-# Prerequisite: /kaggle/temp/YOLO_PCB exists with train/val/test and data.yaml
+# Paste into ONE Kaggle cell. Works if ANY of these exist:
+#   A) /kaggle/temp/YOLO_PCB  (same session as step1 prep)
+#   B) /kaggle/working/yolo_pcb_dataset.zip  (already zipped)
+#   C) /kaggle/input/.../yolo_pcb_dataset.zip  (attached dataset / uploaded zip)
+#   D) /kaggle/input/.../YOLO_PCB  (attached extracted folder)
+#
+# Then publishes to aditya2402/pcb-yolo-prepared (needs Secrets: KAGGLE_USERNAME, KAGGLE_KEY)
 
 from pathlib import Path
 import json
+import os
 import shutil
+import subprocess
+import sys
 
-YOLO_ROOT = Path("/kaggle/temp/YOLO_PCB")
+DATASET_SLUG = "aditya2402/pcb-yolo-prepared"
 WORK = Path("/kaggle/working")
 ZIP_PATH = WORK / "yolo_pcb_dataset.zip"
 META_DIR = WORK / "pcb_yolo_prepared_upload"
-META_PATH = META_DIR / "dataset-metadata.json"
+YOLO_ROOT = Path("/kaggle/temp/YOLO_PCB")
+INPUT_ROOT = Path("/kaggle/input")
 
-if not (YOLO_ROOT / "data.yaml").exists():
-    raise FileNotFoundError(f"Missing {YOLO_ROOT / 'data.yaml'} — run dataset prep cells first.")
 
-for split in ("train", "val", "test"):
-    n = len(list((YOLO_ROOT / split / "images").glob("*")))
-    print(f"{split}: {n} images")
+def find_existing_zip() -> Path | None:
+    if ZIP_PATH.exists():
+        return ZIP_PATH
+    if INPUT_ROOT.exists():
+        for p in INPUT_ROOT.rglob("yolo_pcb_dataset.zip"):
+            return p
+    return None
 
-# Rewrite data.yaml so paths work after unzip anywhere
-names_block = "\n".join(
-    f"  {i}: {name}"
-    for i, name in enumerate(
-        ["Missing_hole", "Mouse_bite", "Open_circuit", "Short", "Spur", "Spurious_copper"]
+
+def find_yolo_root() -> Path | None:
+    if (YOLO_ROOT / "data.yaml").exists():
+        return YOLO_ROOT
+    if INPUT_ROOT.exists():
+        for p in INPUT_ROOT.rglob("YOLO_PCB"):
+            if (p / "data.yaml").exists() or (p / "train" / "images").exists():
+                return p
+    staging = WORK / "YOLO_PCB"
+    if (staging / "train" / "images").exists():
+        return staging
+    return None
+
+
+def build_zip_from_root(root: Path) -> Path:
+    names_block = "\n".join(
+        f"  {i}: {name}"
+        for i, name in enumerate(
+            ["Missing_hole", "Mouse_bite", "Open_circuit", "Short", "Spur", "Spurious_copper"]
+        )
     )
-)
-fixed_yaml = (
-    "path: .\n"
-    "train: train/images\n"
-    "val: val/images\n"
-    "test: test/images\n"
-    f"names:\n{names_block}\n"
-)
-(WORK / "YOLO_PCB").mkdir(exist_ok=True)
-staging = WORK / "YOLO_PCB"
-if staging.exists():
-  shutil.rmtree(staging)
-shutil.copytree(YOLO_ROOT, staging)
-(staging / "data.yaml").write_text(fixed_yaml)
+    staging = WORK / "YOLO_PCB_staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    shutil.copytree(root, staging)
+    (staging / "data.yaml").write_text(
+        "path: .\n"
+        "train: train/images\n"
+        "val: val/images\n"
+        "test: test/images\n"
+        f"names:\n{names_block}\n"
+    )
+    if ZIP_PATH.exists():
+        ZIP_PATH.unlink()
+    shutil.make_archive(str(ZIP_PATH.with_suffix("")), "zip", staging.parent, staging.name)
+    shutil.rmtree(staging)
+    return ZIP_PATH
 
-if ZIP_PATH.exists():
-    ZIP_PATH.unlink()
-shutil.make_archive(str(ZIP_PATH.with_suffix("")), "zip", staging.parent, staging.name)
+
+existing_zip = find_existing_zip()
+yolo_root = find_yolo_root()
+
+if existing_zip and existing_zip != ZIP_PATH:
+    print(f"Using attached zip: {existing_zip}")
+    shutil.copy2(existing_zip, ZIP_PATH)
+elif yolo_root is not None:
+    print(f"Building zip from: {yolo_root}")
+    for split in ("train", "val", "test"):
+        n = len(list((yolo_root / split / "images").glob("*")))
+        print(f"  {split}: {n} images")
+    build_zip_from_root(yolo_root)
+elif ZIP_PATH.exists():
+    print(f"Using existing: {ZIP_PATH}")
+else:
+    raise FileNotFoundError(
+        "No YOLO_PCB found.\n"
+        "Fix (pick one):\n"
+        "  1) In THIS notebook run kaggle_kernel/step1_yolo_pcb_prep_paste.py first, OR\n"
+        "  2) Add Data → upload yolo_pcb_dataset.zip from your earlier run, OR\n"
+        "  3) Re-open the notebook where prep finished (5551 train) and run publish there.\n"
+        "  /kaggle/temp is EMPTY in every new notebook until prep runs again."
+    )
+
 size_mb = ZIP_PATH.stat().st_size / (1024 * 1024)
-print(f"Created {ZIP_PATH} ({size_mb:.1f} MiB)")
+print(f"Ready to publish: {ZIP_PATH} ({size_mb:.1f} MiB)")
 
-META_DIR.mkdir(exist_ok=True)
-META_PATH.write_text(
+# --- publish to Kaggle Dataset (needs API secrets) ---
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle"])
+from kaggle_secrets import UserSecretsClient
+
+secrets = UserSecretsClient()
+os.environ["KAGGLE_USERNAME"] = secrets.get_secret("KAGGLE_USERNAME")
+os.environ["KAGGLE_KEY"] = secrets.get_secret("KAGGLE_KEY")
+
+if META_DIR.exists():
+    shutil.rmtree(META_DIR)
+META_DIR.mkdir(parents=True)
+shutil.copy2(ZIP_PATH, META_DIR / ZIP_PATH.name)
+(META_DIR / "dataset-metadata.json").write_text(
     json.dumps(
         {
-            "title": "PCB YOLO Prepared (YOLO_PCB)",
-            "id": "aditya2402/pcb-yolo-prepared",
+            "title": "PCB YOLO Prepared (YOLO_PCB zip)",
+            "id": DATASET_SLUG,
             "licenses": [{"name": "CC0-1.0"}],
         },
         indent=2,
     )
     + "\n"
 )
-print(f"Wrote {META_PATH}")
-print(
-    "\nNext steps:\n"
-    "1) Download yolo_pcb_dataset.zip from Output, OR\n"
-    "2) On laptop: unzip, put zip in META_DIR, run:\n"
-    "     kaggle datasets create -p pcb_yolo_prepared_upload\n"
-    "   OR use Kaggle UI → New Dataset → upload the zip.\n"
-    "3) On Nautilus: bash tools/fetch_yolo_pcb_on_nautilus.sh\n"
+
+create = subprocess.run(
+    ["kaggle", "datasets", "create", "-p", str(META_DIR), "-m", "YOLO_PCB zip"],
+    capture_output=True,
+    text=True,
 )
+if create.returncode == 0:
+    print("Created dataset:", DATASET_SLUG)
+else:
+    subprocess.run(
+        [
+            "kaggle",
+            "datasets",
+            "version",
+            "-p",
+            str(META_DIR),
+            "-m",
+            "Updated YOLO_PCB zip",
+            "--dir-mode",
+            "zip",
+        ],
+        check=True,
+    )
+    print("Published new version:", DATASET_SLUG)
+
+print("\nOn Nautilus: git pull && bash tools/fetch_yolo_pcb_on_nautilus.sh")
