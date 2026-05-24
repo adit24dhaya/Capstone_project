@@ -29,6 +29,7 @@ YOLO11L_ONNX = (
     / "best.onnx"
 )
 YOLO11L_SELECTED_FIGURES = ROOT / "local_artifacts" / "outputs" / "nautilus" / "runs" / "paper_figures" / "yolo11l_1280_selected_examples"
+CHAMPION_EVAL_SWEEP = REPORT_DIR / "champion_eval_sweep.csv"
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -253,6 +254,23 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
     lines.extend(
         [
             "",
+            "## Champion Evaluation Sweep",
+            "",
+            (
+                "On May 24, 2026, the restored YOLO11l 1280 champion checkpoint was re-evaluated "
+                "on Nautilus V100 at 1280 and 1536 image sizes, with and without Ultralytics "
+                "test-time augmentation (`augment=True`). The best test mAP50-95 remained the "
+                "original 1280/no-TTA setting: precision `0.9832`, recall `0.9881`, "
+                "mAP50 `0.9898`, mAP50-95 `0.5769`."
+            ),
+            "",
+            (
+                "The sweep is useful for the paper because it shows that simply increasing "
+                "inference size to 1536 or enabling TTA did not improve strict localization. "
+                "Use 1280/no-TTA as the headline configuration, and mention the sweep as a "
+                "negative ablation supporting the chosen deployment setting."
+            ),
+            "",
             "## Important Caveat",
             "",
             (
@@ -263,6 +281,7 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
             "## Evidence Files",
             "",
             "- `reports/publication/model_comparison.csv`",
+            "- `reports/publication/champion_eval_sweep.csv`",
             "- `reports/publication/yolo11l_1280_training_summary.csv`",
             "- `reports/publication/yolo11m_960_training_summary.csv`",
             f"- Local artifact backup: `{YOLO11L_ARTIFACT.relative_to(ROOT)}/`",
@@ -315,12 +334,14 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 - Hardware and environment table.
 - Training settings table.
 - Model comparison table from `model_comparison.csv`.
+- Champion inference sweep table from `champion_eval_sweep.csv`.
 - Per-class table for YOLO11l 1280 and fusion models.
 - Latency and deployment analysis.
 
 ## 5. Results and Discussion
 
 - YOLO11l 1280 is the strongest current accuracy result.
+- The 1280/no-TTA champion setting beat 1536 and TTA variants in strict test mAP50-95, so the final detector setting is empirically justified rather than arbitrary.
 - Fusion improves the precision/recall tradeoff discussion but is not always the highest mAP model.
 - Missing_hole remains easiest; Short/Spur localization is harder under stricter mAP50-95.
 - Discuss 2080 Ti feasibility and why A100 is requested for final high-resolution ablations.
@@ -334,6 +355,18 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 ## 7. Conclusion
 
 - Summarize real-time embedded inspection result and practical cost-aware evaluation.
+
+## Acknowledgments
+
+- Thank Dr. Paul Salvador Inventado for guidance and feedback throughout the project.
+- Thank Professor Ryu for support with Nautilus/NRP access and research computing resources.
+- Include the required NRP/Nautilus acknowledgment exactly:
+
+```text
+This work used resources available through the National Research Platform (NRP) at the University of California, San Diego. NRP has been developed, and is supported in part, by funding from National Science Foundation, from awards 1730158, 1540112, 1541349, 1826967, 2112167, 2100237, and 2120019, as well as additional funding from community partners. The CSUF Titan Supercomputing Center is one of the collaborative partners to contribute to NRP resources.
+```
+
+- Cite: The National Research Platform: Stretched, Multi-Tenant, Scientific Kubernetes Cluster.
 """
     (REPORT_DIR / "paper_outline.md").write_text(outline, encoding="utf-8")
 
@@ -350,13 +383,14 @@ def write_checklist() -> None:
 - YOLO11m 960 Nautilus/RTX 2080 Ti result with saved `best.pt`, logs, curves, and metrics.
 - YOLO11l 1280 Nautilus/RTX 2080 Ti result in `local_artifacts/yolo11l_1280_publication_outputs_20260522_092005/`.
 - YOLO11l 1280 ONNX export in `local_artifacts/yolo11l_1280_onnx_export_20260522_102315/`.
+- YOLO11l 1280 champion eval sweep on Nautilus V100, saved in `reports/publication/champion_eval_sweep.csv`; 1280/no-TTA remains best.
 - Six selected prediction examples in `local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples/`.
 
 ## Still Worth Running
 
 1. Faster R-CNN baseline on the current split.
 2. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
-3. Optional YOLO11l fine-tune only if more time/GPU is available.
+3. Unified same-workflow evaluation table for all saved YOLO checkpoints, then stop tuning unless it reveals a reproducibility gap.
 
 ## Repeatable Export Command
 
@@ -412,9 +446,54 @@ exit $EXIT_CODE
 ' > ~/logs/faster_rcnn.log 2>&1 &
 ```
 
+## Unified Paper Evaluation Command
+
+Run this after restoring the saved checkpoint folders under `~/outputs/nautilus/runs/detector_train/`. It re-evaluates every available YOLO checkpoint with the same dataset YAML, split, evaluator, and workers setting, then writes CSV/JSON summaries plus paper figures.
+
+```bash
+cd ~/Capstone_project
+git pull
+mkdir -p ~/logs ~/backups
+
+python tools/run_nautilus_experiments.py \\
+  --experiment paper_unified_eval \\
+  --data-root ~/data \\
+  --output-dir ~/outputs/nautilus \\
+  --workers 0 \\
+  --device 0 \\
+  --prediction-save-limit 6 \\
+  2>&1 | tee ~/logs/paper_unified_eval.log
+
+cd ~
+zip -r backups/paper_unified_eval_$(date +%Y%m%d_%H%M%S).zip \\
+  outputs/nautilus/runs/paper_unified_eval \\
+  logs/paper_unified_eval.log
+```
+
+Expected outputs:
+
+- `~/outputs/nautilus/runs/paper_unified_eval/paper_unified_eval_metrics.csv`
+- `~/outputs/nautilus/runs/paper_unified_eval/paper_unified_eval_per_class.csv`
+- `~/outputs/nautilus/runs/paper_unified_eval/paper_unified_eval_summary.json`
+- `~/outputs/nautilus/runs/paper_unified_eval/paper_unified_eval_summary.md`
+- `~/outputs/nautilus/runs/paper_unified_eval/figures/*.png`
+- `~/outputs/nautilus/runs/paper_unified_eval/qualitative_examples_*/`
+
 ## Paper Priority
 
 Start writing now using YOLO11l @ 1280 as the main detector. Use YOLO11m-960 and Kaggle fusion as ablations. Treat Faster R-CNN and cross-dataset as optional before ESCS (May 27).
+
+## Required Acknowledgments
+
+- Thank Dr. Paul Salvador Inventado for guidance and feedback throughout the project.
+- Thank Professor Ryu for support with Nautilus/NRP access and research computing resources.
+- Include the required NRP/Nautilus acknowledgment exactly in the paper acknowledgments section:
+
+```text
+This work used resources available through the National Research Platform (NRP) at the University of California, San Diego. NRP has been developed, and is supported in part, by funding from National Science Foundation, from awards 1730158, 1540112, 1541349, 1826967, 2112167, 2100237, and 2120019, as well as additional funding from community partners. The CSUF Titan Supercomputing Center is one of the collaborative partners to contribute to NRP resources.
+```
+
+- Add the NRP citation: The National Research Platform: Stretched, Multi-Tenant, Scientific Kubernetes Cluster.
 """
     (REPORT_DIR / "final_experiment_checklist.md").write_text(checklist, encoding="utf-8")
 
@@ -458,8 +537,10 @@ def write_metadata() -> None:
             "yolo11l_1280_artifact": str(YOLO11L_ARTIFACT.relative_to(ROOT)),
             "yolo11l_1280_onnx_artifact": str(YOLO11L_ONNX_ARTIFACT.relative_to(ROOT)),
             "yolo11l_1280_selected_figures": str(YOLO11L_SELECTED_FIGURES.relative_to(ROOT)),
+            "champion_eval_sweep": str(CHAMPION_EVAL_SWEEP.relative_to(ROOT)),
         },
         "primary_completed_result": "YOLO11l 1280 test mAP50-95 0.5769",
+        "primary_eval_setting": "imgsz=1280, augment=False; 1536 and TTA did not improve test mAP50-95",
         "previous_headline": "YOLO11m 960 test mAP50-95 0.5347",
         "target_venue": "ESCS'26",
         "deadline": "2026-05-27",

@@ -1263,6 +1263,470 @@ def run_visual_examples(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def default_paper_eval_models(output_dir: Path) -> list[dict]:
+    train_dir = output_dir / "runs" / "detector_train"
+    return [
+        {
+            "model": "YOLO11l_1280_champion",
+            "weights": train_dir / "yolo11l_1280_publication" / "weights" / "best.pt",
+            "imgsz": 1280,
+            "batch": 2,
+            "notes": "Original headline YOLO11l 1280 checkpoint.",
+        },
+        {
+            "model": "YOLO11m_960_ablation",
+            "weights": train_dir / "yolo11m_960_publication" / "weights" / "best.pt",
+            "imgsz": 960,
+            "batch": 2,
+            "notes": "Medium-resolution YOLO ablation.",
+        },
+        {
+            "model": "YOLO11l_1280_v100_repeat",
+            "weights": train_dir / "yolo11l_1280_publication_v100_w0" / "weights" / "best.pt",
+            "imgsz": 1280,
+            "batch": 4,
+            "notes": "Same model family repeated on V100 with current runner.",
+        },
+        {
+            "model": "YOLO11l_1280_refine_lowaug_v1",
+            "weights": train_dir / "yolo11l_1280_refine_lowaug_v1" / "weights" / "best.pt",
+            "imgsz": 1280,
+            "batch": 4,
+            "notes": "Low-augmentation fine-tune from the V100 repeat checkpoint.",
+        },
+    ]
+
+
+def load_paper_eval_models(args: argparse.Namespace, output_dir: Path) -> list[dict]:
+    if not args.paper_eval_models_json:
+        return default_paper_eval_models(output_dir)
+
+    config_path = expand_path(args.paper_eval_models_json)
+    config = json.loads(config_path.read_text())
+    rows = config.get("models", config) if isinstance(config, dict) else config
+    if not isinstance(rows, list):
+        raise ValueError("--paper-eval-models-json must contain a list or {'models': [...]}")
+
+    models = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"Invalid model config at index {idx}: expected mapping")
+        model_name = row.get("model") or row.get("name")
+        weights = row.get("weights")
+        if not model_name or not weights:
+            raise ValueError(f"Model config at index {idx} needs 'model'/'name' and 'weights'")
+        models.append(
+            {
+                "model": str(model_name),
+                "weights": expand_path(weights),
+                "imgsz": int(row.get("imgsz", args.imgsz)),
+                "batch": int(row.get("batch", args.batch)),
+                "notes": str(row.get("notes", "")),
+            }
+        )
+    return models
+
+
+def metric_sequence(value: object) -> list:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def metric_value(value: object) -> float | str:
+    if value in (None, ""):
+        return ""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return ""
+
+
+def extract_ultralytics_speed(metrics: object) -> dict:
+    speed = getattr(metrics, "speed", {}) or {}
+    preprocess_ms = metric_value(speed.get("preprocess"))
+    inference_ms = metric_value(speed.get("inference"))
+    postprocess_ms = metric_value(speed.get("postprocess"))
+    total_ms = ""
+    if all(isinstance(value, float) for value in [preprocess_ms, inference_ms, postprocess_ms]):
+        total_ms = preprocess_ms + inference_ms + postprocess_ms
+    return {
+        "preprocess_ms": preprocess_ms,
+        "inference_ms": inference_ms,
+        "postprocess_ms": postprocess_ms,
+        "total_ms": total_ms,
+    }
+
+
+def metric_class_name(names: object, class_id: int) -> str:
+    if isinstance(names, dict):
+        return str(names.get(class_id, CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) else class_id))
+    if isinstance(names, (list, tuple)) and class_id < len(names):
+        return str(names[class_id])
+    return CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) else str(class_id)
+
+
+def extract_ultralytics_per_class(metrics: object, model_name: str, split: str, imgsz: int, augment: bool) -> list[dict]:
+    box = metrics.box
+    names = getattr(metrics, "names", None) or {idx: name for idx, name in enumerate(CLASS_NAMES)}
+    class_indexes = [int(x) for x in metric_sequence(getattr(box, "ap_class_index", []))]
+    if not class_indexes:
+        class_indexes = list(range(len(CLASS_NAMES)))
+
+    precision_values = metric_sequence(getattr(box, "p", []))
+    recall_values = metric_sequence(getattr(box, "r", []))
+    map50_values = metric_sequence(getattr(box, "ap50", []))
+    maps_values = metric_sequence(getattr(box, "maps", []))
+
+    rows = []
+    for position, class_id in enumerate(class_indexes):
+        class_name = metric_class_name(names, class_id)
+        map50_95 = maps_values[class_id] if class_id < len(maps_values) else ""
+        rows.append(
+            {
+                "model": model_name,
+                "split": split,
+                "imgsz": imgsz,
+                "augment": augment,
+                "class_id": class_id,
+                "class_name": class_name,
+                "precision": metric_value(precision_values[position] if position < len(precision_values) else ""),
+                "recall": metric_value(recall_values[position] if position < len(recall_values) else ""),
+                "mAP50": metric_value(map50_values[position] if position < len(map50_values) else ""),
+                "mAP50_95": metric_value(map50_95),
+            }
+        )
+    return rows
+
+
+def save_bar_chart(
+    rows: list[dict],
+    output_path: Path,
+    value_key: str,
+    title: str,
+    ylabel: str,
+    descending: bool = True,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not rows:
+        return
+    sorted_rows = sorted(rows, key=lambda row: float(row.get(value_key) or 0), reverse=descending)
+    labels = [row["model"] for row in sorted_rows]
+    values = [float(row.get(value_key) or 0) for row in sorted_rows]
+
+    fig_width = max(8.0, 1.5 * len(labels))
+    plt.figure(figsize=(fig_width, 5.0))
+    colors = ["#1f77b4" if idx else "#2ca02c" for idx in range(len(labels))]
+    bars = plt.bar(labels, values, color=colors)
+    for bar, value in zip(bars, values):
+        plt.text(bar.get_x() + bar.get_width() / 2, value, f"{value:.3f}", ha="center", va="bottom", fontsize=9)
+    plt.title(title)
+    plt.ylabel(ylabel)
+    plt.xticks(rotation=20, ha="right")
+    max_value = max(values)
+    upper = min(1.05, max_value + 0.08) if max_value <= 1.0 else max_value * 1.12
+    plt.ylim(0, upper)
+    plt.grid(axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
+def save_val_test_chart(rows: list[dict], output_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    models = sorted({row["model"] for row in rows})
+    if not models:
+        return
+    val_lookup = {(row["model"], row["split"]): float(row.get("mAP50_95") or 0) for row in rows}
+    x_positions = list(range(len(models)))
+    width = 0.36
+
+    plt.figure(figsize=(max(8.0, 1.6 * len(models)), 5.0))
+    val_values = [val_lookup.get((model, "val"), 0.0) for model in models]
+    test_values = [val_lookup.get((model, "test"), 0.0) for model in models]
+    plt.bar([x - width / 2 for x in x_positions], val_values, width=width, label="val", color="#4c78a8")
+    plt.bar([x + width / 2 for x in x_positions], test_values, width=width, label="test", color="#f58518")
+    plt.xticks(x_positions, models, rotation=20, ha="right")
+    plt.ylabel("mAP50-95")
+    plt.title("Unified Val/Test mAP50-95")
+    plt.ylim(0, min(1.05, max(val_values + test_values) + 0.08))
+    plt.grid(axis="y", alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
+def save_precision_recall_scatter(rows: list[dict], output_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    test_rows = [row for row in rows if row["split"] == "test"]
+    if not test_rows:
+        return
+    plt.figure(figsize=(6.5, 5.5))
+    for row in test_rows:
+        precision = float(row.get("precision") or 0)
+        recall = float(row.get("recall") or 0)
+        plt.scatter(recall, precision, s=70)
+        plt.annotate(row["model"], (recall, precision), xytext=(5, 5), textcoords="offset points", fontsize=8)
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Unified Test Precision/Recall")
+    plt.xlim(0.7, 1.01)
+    plt.ylim(0.7, 1.01)
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
+def save_per_class_heatmap(rows: list[dict], output_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    test_rows = [row for row in rows if row["split"] == "test" and row.get("mAP50_95") != ""]
+    models = sorted({row["model"] for row in test_rows})
+    classes = [name for name in CLASS_NAMES if any(row["class_name"] == name for row in test_rows)]
+    if not models or not classes:
+        return
+
+    lookup = {(row["model"], row["class_name"]): float(row["mAP50_95"]) for row in test_rows}
+    matrix = [[lookup.get((model, class_name), 0.0) for class_name in classes] for model in models]
+
+    plt.figure(figsize=(max(8.0, 1.2 * len(classes)), max(4.0, 0.55 * len(models) + 2)))
+    image = plt.imshow(matrix, cmap="viridis", vmin=0, vmax=1, aspect="auto")
+    plt.colorbar(image, label="mAP50-95")
+    plt.xticks(range(len(classes)), classes, rotation=25, ha="right")
+    plt.yticks(range(len(models)), models)
+    plt.title("Per-Class Test mAP50-95")
+    for y, row in enumerate(matrix):
+        for x, value in enumerate(row):
+            plt.text(x, y, f"{value:.2f}", ha="center", va="center", color="white" if value < 0.55 else "black", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
+def write_markdown_summary(path: Path, rows: list[dict], skipped: list[dict]) -> None:
+    test_rows = sorted(
+        [row for row in rows if row["split"] == "test"],
+        key=lambda row: float(row.get("mAP50_95") or 0),
+        reverse=True,
+    )
+    lines = [
+        "# Paper Unified Evaluation",
+        "",
+        "All rows were produced with the same converted Current PCB YOLO dataset, the same train/val/test split, and Ultralytics `model.val` evaluator.",
+        "",
+        "| Rank | Model | Precision | Recall | mAP50 | mAP50-95 | Inference ms |",
+        "|---:|---|---:|---:|---:|---:|---:|",
+    ]
+    for rank, row in enumerate(test_rows, start=1):
+        lines.append(
+            "| {rank} | {model} | {precision:.4f} | {recall:.4f} | {mAP50:.4f} | {mAP50_95:.4f} | {inference_ms} |".format(
+                rank=rank,
+                model=row["model"],
+                precision=float(row.get("precision") or 0),
+                recall=float(row.get("recall") or 0),
+                mAP50=float(row.get("mAP50") or 0),
+                mAP50_95=float(row.get("mAP50_95") or 0),
+                inference_ms=f"{float(row['inference_ms']):.1f}" if row.get("inference_ms") != "" else "",
+            )
+        )
+    if skipped:
+        lines.extend(["", "## Skipped Checkpoints", ""])
+        for row in skipped:
+            lines.append(f"- `{row['model']}` missing `{row['weights']}`")
+    write_text(path, "\n".join(lines) + "\n")
+
+
+def run_paper_unified_eval(args: argparse.Namespace) -> None:
+    """Re-evaluate saved YOLO checkpoints with one evaluator and save paper-ready plots."""
+    from ultralytics import YOLO
+
+    output_dir = expand_path(args.output_dir)
+    run_dir = output_dir / "runs" / "paper_unified_eval"
+    figure_dir = run_dir / "figures"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    figure_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.external_data_yaml:
+        data_yaml = expand_path(args.external_data_yaml)
+    else:
+        summary = load_conversion_summary(args)
+        data_yaml = Path(summary["data_yaml"])
+
+    configured_models = load_paper_eval_models(args, output_dir)
+    rows: list[dict] = []
+    per_class_rows: list[dict] = []
+    skipped: list[dict] = []
+
+    for config in configured_models:
+        weights = Path(config["weights"]).expanduser()
+        if not weights.exists():
+            skipped.append({"model": config["model"], "weights": str(weights), "reason": "missing_weights"})
+            print(f"SKIP {config['model']}: missing {weights}")
+            continue
+
+        print(f"Evaluating {config['model']} from {weights}")
+        model = YOLO(str(weights))
+        for split in ["val", "test"]:
+            metrics = model.val(
+                data=str(data_yaml),
+                imgsz=int(config["imgsz"]),
+                batch=int(config["batch"]),
+                device=args.device,
+                split=split,
+                workers=args.workers,
+                augment=args.paper_eval_augment,
+                project=str(run_dir / "ultralytics"),
+                name=f"{config['model']}_{split}",
+                exist_ok=True,
+            )
+            speed = extract_ultralytics_speed(metrics)
+            row = {
+                "model": config["model"],
+                "split": split,
+                "weights": str(weights),
+                "imgsz": int(config["imgsz"]),
+                "batch": int(config["batch"]),
+                "augment": args.paper_eval_augment,
+                "precision": float(metrics.box.mp),
+                "recall": float(metrics.box.mr),
+                "mAP50": float(metrics.box.map50),
+                "mAP50_95": float(metrics.box.map),
+                **speed,
+                "notes": config.get("notes", ""),
+            }
+            rows.append(row)
+            per_class_rows.extend(
+                extract_ultralytics_per_class(metrics, config["model"], split, int(config["imgsz"]), args.paper_eval_augment)
+            )
+            print(row)
+
+    metrics_fields = [
+        "model",
+        "split",
+        "weights",
+        "imgsz",
+        "batch",
+        "augment",
+        "precision",
+        "recall",
+        "mAP50",
+        "mAP50_95",
+        "preprocess_ms",
+        "inference_ms",
+        "postprocess_ms",
+        "total_ms",
+        "notes",
+    ]
+    per_class_fields = [
+        "model",
+        "split",
+        "imgsz",
+        "augment",
+        "class_id",
+        "class_name",
+        "precision",
+        "recall",
+        "mAP50",
+        "mAP50_95",
+    ]
+    write_csv(run_dir / "paper_unified_eval_metrics.csv", rows, metrics_fields)
+    write_csv(run_dir / "paper_unified_eval_per_class.csv", per_class_rows, per_class_fields)
+
+    test_rows = [row for row in rows if row["split"] == "test"]
+    save_bar_chart(test_rows, figure_dir / "test_mAP50_95_by_model.png", "mAP50_95", "Unified Test mAP50-95 by Model", "mAP50-95")
+    save_bar_chart(test_rows, figure_dir / "test_mAP50_by_model.png", "mAP50", "Unified Test mAP50 by Model", "mAP50")
+    save_bar_chart(
+        test_rows,
+        figure_dir / "test_inference_ms_by_model.png",
+        "inference_ms",
+        "Unified Test Inference Time by Model",
+        "Inference ms/image",
+        descending=False,
+    )
+    save_val_test_chart(rows, figure_dir / "val_test_mAP50_95_by_model.png")
+    save_precision_recall_scatter(rows, figure_dir / "test_precision_recall_scatter.png")
+    save_per_class_heatmap(per_class_rows, figure_dir / "test_per_class_mAP50_95_heatmap.png")
+    write_markdown_summary(run_dir / "paper_unified_eval_summary.md", rows, skipped)
+
+    best_test = max(test_rows, key=lambda row: float(row.get("mAP50_95") or 0), default=None)
+    qualitative_summary = None
+    if best_test and args.prediction_save_limit > 0:
+        test_items = load_yolo_items_from_data_yaml(data_yaml, "test")
+        selected = select_visual_example_items(test_items, args.prediction_save_limit)
+        if selected:
+            model = YOLO(best_test["weights"])
+            qualitative_name = f"qualitative_examples_{best_test['model']}"
+            model.predict(
+                source=[str(item["image_path"]) for item in selected],
+                imgsz=int(best_test["imgsz"]),
+                conf=args.eval_conf,
+                save=True,
+                save_txt=True,
+                save_conf=True,
+                project=str(run_dir),
+                name=qualitative_name,
+                exist_ok=True,
+                device=args.device,
+            )
+            qualitative_dir = run_dir / qualitative_name
+            manifest = []
+            for item in selected:
+                manifest.append(
+                    {
+                        "image": str(item["image_path"]),
+                        "saved_prediction": str(qualitative_dir / item["image_path"].name),
+                        "classes": ";".join(CLASS_NAMES[label] for label in sorted(set(item["labels"]))),
+                        "boxes": len(item["boxes"]),
+                        "width": item["width"],
+                        "height": item["height"],
+                    }
+                )
+            write_csv(qualitative_dir / "qualitative_examples_manifest.csv", manifest)
+            qualitative_summary = {
+                "model": best_test["model"],
+                "weights": best_test["weights"],
+                "run_dir": str(qualitative_dir),
+                "manifest": str(qualitative_dir / "qualitative_examples_manifest.csv"),
+                "examples": len(manifest),
+            }
+
+    summary = {
+        "run_dir": str(run_dir),
+        "data_yaml": str(data_yaml),
+        "metrics_csv": str(run_dir / "paper_unified_eval_metrics.csv"),
+        "per_class_csv": str(run_dir / "paper_unified_eval_per_class.csv"),
+        "summary_md": str(run_dir / "paper_unified_eval_summary.md"),
+        "figures": sorted(str(path) for path in figure_dir.glob("*.png")),
+        "qualitative_examples": qualitative_summary,
+        "skipped": skipped,
+        "environment": environment_summary(),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    write_text(run_dir / "paper_unified_eval_summary.json", json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
 def wbf_fuse_image(
     yolo_pred: dict,
     transformer_pred: dict,
@@ -1743,6 +2207,7 @@ def build_parser() -> argparse.ArgumentParser:
             "detector_eval",
             "detector_export",
             "visual_examples",
+            "paper_unified_eval",
             "faster_rcnn",
             "cross_dataset",
             "segmentation_pilot",
@@ -1795,6 +2260,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--missed-defect-penalty", type=float, default=5.0)
     parser.add_argument("--calibration-bins", type=int, default=10)
     parser.add_argument("--prediction-save-limit", type=int, default=20)
+    parser.add_argument("--paper-eval-models-json", default=None, help="Optional JSON list of {'model', 'weights', 'imgsz', 'batch'} configs for paper_unified_eval.")
+    parser.add_argument("--paper-eval-augment", action=argparse.BooleanOptionalAction, default=False, help="Use Ultralytics augment=True during paper_unified_eval.")
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--external-data-yaml", default=None)
     parser.add_argument("--yolo-weights", default="yolo11n.pt")
@@ -1823,6 +2290,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         run_detector_export(args)
     elif args.experiment == "visual_examples":
         run_visual_examples(args)
+    elif args.experiment == "paper_unified_eval":
+        run_paper_unified_eval(args)
     elif args.experiment == "faster_rcnn":
         run_faster_rcnn(args)
     elif args.experiment == "cross_dataset":

@@ -38,12 +38,14 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 - Hardware and environment table.
 - Training settings table.
 - Model comparison table from `model_comparison.csv`.
+- Champion inference sweep table from `champion_eval_sweep.csv`.
 - Per-class table for YOLO11l 1280 and fusion models.
 - Latency and deployment analysis.
 
 ## 5. Results and Discussion
 
 - YOLO11l 1280 is the strongest current accuracy result.
+- The 1280/no-TTA champion setting beat 1536 and TTA variants in strict test mAP50-95, so the final detector setting is empirically justified rather than arbitrary.
 - Fusion improves the precision/recall tradeoff discussion but is not always the highest mAP model.
 - Missing_hole remains easiest; Short/Spur localization is harder under stricter mAP50-95.
 - Discuss 2080 Ti feasibility and why A100 is requested for final high-resolution ablations.
@@ -57,3 +59,15 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 ## 7. Conclusion
 
 - Summarize real-time embedded inspection result and practical cost-aware evaluation.
+
+## Acknowledgments
+
+- Thank Dr. Paul Salvador Inventado for guidance and feedback throughout the project.
+- Thank Professor Ryu for support with Nautilus/NRP access and research computing resources.
+- Include the required NRP/Nautilus acknowledgment exactly:
+
+```text
+This work used resources available through the National Research Platform (NRP) at the University of California, San Diego. NRP has been developed, and is supported in part, by funding from National Science Foundation, from awards 1730158, 1540112, 1541349, 1826967, 2112167, 2100237, and 2120019, as well as additional funding from community partners. The CSUF Titan Supercomputing Center is one of the collaborative partners to contribute to NRP resources.
+```
+
+- Cite: The National Research Platform: Stretched, Multi-Tenant, Scientific Kubernetes Cluster.

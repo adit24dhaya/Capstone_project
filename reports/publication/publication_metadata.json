@@ -4,9 +4,11 @@
     "yolo11m_960_artifact": "local_artifacts/yolo11m_960_publication_outputs_20260522_061024",
     "yolo11l_1280_artifact": "local_artifacts/yolo11l_1280_publication_outputs_20260522_092005",
     "yolo11l_1280_onnx_artifact": "local_artifacts/yolo11l_1280_onnx_export_20260522_102315",
-    "yolo11l_1280_selected_figures": "local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples"
+    "yolo11l_1280_selected_figures": "local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples",
+    "champion_eval_sweep": "reports/publication/champion_eval_sweep.csv"
   },
   "primary_completed_result": "YOLO11l 1280 test mAP50-95 0.5769",
+  "primary_eval_setting": "imgsz=1280, augment=False; 1536 and TTA did not improve test mAP50-95",
   "previous_headline": "YOLO11m 960 test mAP50-95 0.5347",
   "target_venue": "ESCS'26",
   "deadline": "2026-05-27"
