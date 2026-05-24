@@ -25,6 +25,15 @@ mkdir -p "$TMP"
 echo "Downloading $DATASET_SLUG ..."
 kaggle datasets download -d "$DATASET_SLUG" -p "$TMP" --unzip
 
+# Dataset may ship as yolo_pcb_dataset.zip (one file) or extracted YOLO_PCB/
+ZIP_FILE="$(find "$TMP" -maxdepth 1 -name 'yolo_pcb_dataset.zip' -print -quit)"
+if [[ -n "$ZIP_FILE" ]]; then
+  echo "Found dataset zip; installing via install_yolo_pcb_from_zip.sh ..."
+  rm -rf "$TMP"
+  bash "$(dirname "$0")/install_yolo_pcb_from_zip.sh" "$ZIP_FILE"
+  exit 0
+fi
+
 # Find extracted root (zip may contain YOLO_PCB/ or flat train/val/test)
 ROOT=""
 if [[ -d "$TMP/YOLO_PCB" ]]; then
@@ -68,8 +77,8 @@ text = (
 (dest / "data.yaml").write_text(text)
 print("Wrote", dest / "data.yaml")
 train_n = len(list((dest / "train/images").glob("*")))
-if train_n < 1000:
-    print("WARNING: train images < 1000 — likely wrong dataset (expected ~4751).")
+if train_n < 5000:
+    print("WARNING: train images < 5000 — likely wrong dataset (expected ~5551).")
 PY
 
 rm -rf "$TMP"
