@@ -48,6 +48,7 @@ CLASS_ALIASES = {
 }
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+ImageIndex = dict[str, list[Path]]
 
 DSPCBSD_CLASS_ALIASES = {
     "SH": "Short",
@@ -117,7 +118,20 @@ def find_current_pcb_root(data_root: Path) -> Path:
     )
 
 
-def locate_image(dataset_root: Path, class_name: str, filename: str) -> Path:
+def build_image_index(roots: Iterable[Path]) -> ImageIndex:
+    """Index image files once so conversion does not repeatedly walk large trees."""
+    index: dict[str, list[Path]] = defaultdict(list)
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+                index[path.name].append(path)
+                index[path.stem].append(path)
+    return {key: sorted(paths) for key, paths in index.items()}
+
+
+def locate_image(dataset_root: Path, class_name: str, filename: str, image_index: ImageIndex | None = None) -> Path:
     search_dirs = [
         dataset_root / "images" / class_name,
         dataset_root / "rotation" / f"{class_name}_rotation",
@@ -134,16 +148,23 @@ def locate_image(dataset_root: Path, class_name: str, filename: str) -> Path:
             if candidate.exists():
                 return candidate
 
-    matches = list((dataset_root / "images").rglob(filename))
-    if matches:
-        return matches[0]
-    matches = list((dataset_root / "rotation").rglob(filename))
-    if matches:
-        return matches[0]
+    if image_index:
+        for key in (filename, stem):
+            matches = image_index.get(key, [])
+            for match in matches:
+                if class_name in match.parts or f"{class_name}_rotation" in match.parts:
+                    return match
+            if matches:
+                return matches[0]
+
+    for root in [dataset_root / "images", dataset_root / "rotation"]:
+        matches = list(root.rglob(filename))
+        if matches:
+            return matches[0]
     raise FileNotFoundError(f"Could not find image for {filename} ({class_name})")
 
 
-def parse_xml_record(xml_path: Path, dataset_root: Path) -> tuple[DatasetRecord, list[tuple[int, float, float, float, float]]]:
+def parse_xml_record(xml_path: Path, dataset_root: Path, image_index: ImageIndex | None = None) -> tuple[DatasetRecord, list[tuple[int, float, float, float, float]]]:
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
@@ -161,7 +182,7 @@ def parse_xml_record(xml_path: Path, dataset_root: Path) -> tuple[DatasetRecord,
 
     folder = root.findtext("folder") or xml_path.parent.name
     folder_class = normalize_class(folder)
-    image_path = locate_image(dataset_root, folder_class, filename)
+    image_path = locate_image(dataset_root, folder_class, filename, image_index)
 
     yolo_boxes: list[tuple[int, float, float, float, float]] = []
     for obj in root.findall("object"):
@@ -223,7 +244,7 @@ def split_records(records: list[tuple[DatasetRecord, list[tuple[int, float, floa
 
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
 
 
 def write_csv(path: Path, rows: list[dict], fieldnames: list[str] | None = None) -> None:
@@ -338,12 +359,13 @@ def convert_current_pcb_to_yolo(data_root: Path, output_dir: Path, seed: int, fi
     yolo_root = output_dir / "datasets" / "current_pcb_yolo"
     manifest_path = output_dir / "current_pcb_conversion_manifest.json"
     summary_path = output_dir / "current_pcb_conversion_summary.json"
+    image_index = build_image_index([dataset_root / "images", dataset_root / "rotation"])
 
     parsed: list[tuple[DatasetRecord, list[tuple[int, float, float, float, float]]]] = []
     skipped: list[dict[str, str]] = []
     for xml_path in iter_xml_files(dataset_root):
         try:
-            parsed.append(parse_xml_record(xml_path, dataset_root))
+            parsed.append(parse_xml_record(xml_path, dataset_root, image_index))
         except Exception as exc:  # noqa: BLE001 - summary should capture all conversion issues.
             skipped.append({"xml_path": str(xml_path), "error": str(exc)})
 
@@ -416,7 +438,7 @@ def normalize_external_class(name: str, class_map: dict[str, str]) -> str | None
     return None
 
 
-def locate_coco_image(coco_root: Path, file_name: str) -> Path:
+def locate_coco_image(coco_root: Path, file_name: str, image_index: ImageIndex | None = None) -> Path:
     direct = coco_root / file_name
     if direct.exists():
         return direct
@@ -429,6 +451,10 @@ def locate_coco_image(coco_root: Path, file_name: str) -> Path:
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    if image_index:
+        matches = image_index.get(Path(file_name).name) or image_index.get(Path(file_name).stem) or []
+        if matches:
+            return matches[0]
     matches = list(coco_root.rglob(Path(file_name).name))
     if matches:
         return matches[0]
@@ -476,6 +502,7 @@ def convert_coco_to_yolo_dataset(
     skipped_categories: dict[str, int] = defaultdict(int)
     image_counts: dict[str, int] = defaultdict(int)
     box_counts: dict[str, int] = defaultdict(int)
+    image_index = build_image_index([coco_root])
 
     for ann_path in annotation_files:
         split = infer_coco_split(ann_path)
@@ -490,7 +517,7 @@ def convert_coco_to_yolo_dataset(
             file_name = image_info.get("file_name")
             if not file_name:
                 continue
-            src_image = locate_coco_image(coco_root, file_name)
+            src_image = locate_coco_image(coco_root, file_name, image_index)
             width = int(image_info.get("width") or 0)
             height = int(image_info.get("height") or 0)
             if width <= 0 or height <= 0:
@@ -1041,6 +1068,7 @@ def run_detector_train(args: argparse.Namespace) -> None:
         "cos_lr": args.cos_lr,
         "cache": args.cache,
         "close_mosaic": args.close_mosaic,
+        "seed": args.seed,
     }
     optional_train_args = {
         "optimizer": args.optimizer,
