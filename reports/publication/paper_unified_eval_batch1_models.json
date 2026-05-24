@@ -1,0 +1,30 @@
+[
+  {
+    "model": "YOLO11l_1280_champion",
+    "weights": "/home/jovyan/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.pt",
+    "imgsz": 1280,
+    "batch": 1,
+    "notes": "Champion checkpoint, batch=1 latency sweep"
+  },
+  {
+    "model": "YOLO11l_1280_v100_sensitivity",
+    "weights": "/home/jovyan/outputs/nautilus/runs/detector_train/yolo11l_1280_publication_v100_w0/weights/best.pt",
+    "imgsz": 1280,
+    "batch": 1,
+    "notes": "V100 sensitivity checkpoint, batch=1 latency sweep"
+  },
+  {
+    "model": "YOLO11l_1280_refine_lowaug_v1",
+    "weights": "/home/jovyan/outputs/nautilus/runs/detector_train/yolo11l_1280_refine_lowaug_v1/weights/best.pt",
+    "imgsz": 1280,
+    "batch": 1,
+    "notes": "Low-aug refine checkpoint, batch=1 latency sweep"
+  },
+  {
+    "model": "YOLO11m_960_ablation",
+    "weights": "/home/jovyan/outputs/nautilus/runs/detector_train/yolo11m_960_publication/weights/best.pt",
+    "imgsz": 960,
+    "batch": 1,
+    "notes": "YOLO11m ablation, batch=1 latency sweep"
+  }
+]

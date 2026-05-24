@@ -687,6 +687,16 @@ def load_conversion_summary(args: argparse.Namespace) -> dict:
     )
 
 
+def resolve_yolo_root_for_items(args: argparse.Namespace) -> Path:
+    """YOLO root for fusion / item loaders; honors --external-data-yaml (Kaggle YOLO_PCB)."""
+    if args.external_data_yaml:
+        data_yaml = expand_path(args.external_data_yaml)
+        cfg = load_yaml(data_yaml)
+        return resolve_dataset_path(data_yaml.parent, cfg.get("path", "."))
+    summary = load_conversion_summary(args)
+    return Path(summary["yolo_root"])
+
+
 def yolo_label_to_xyxy(line: str, width: int, height: int) -> tuple[int, list[float]]:
     class_id_s, xc_s, yc_s, bw_s, bh_s = line.strip().split()
     class_id = int(class_id_s)
@@ -973,17 +983,37 @@ def summarize_calibration(events: list[dict], bins: int) -> tuple[dict, list[dic
     return {"ece": ece, "samples": len(pred_events), "bins": bins}, rows
 
 
-def predict_ultralytics_on_items(model_path: str, items: list[dict], args: argparse.Namespace) -> tuple[list[dict], float]:
-    from tqdm import tqdm
+def load_ultralytics_model(weights: str, engine: str = "auto"):
+    """Load YOLO or RT-DETR Ultralytics model from checkpoint path."""
+    weights_l = str(weights).lower()
+    use_rtdetr = engine == "rtdetr" or (engine == "auto" and "rtdetr" in weights_l)
+    if use_rtdetr:
+        from ultralytics import RTDETR
+
+        return RTDETR(weights)
     from ultralytics import YOLO
 
-    model = YOLO(model_path)
+    return YOLO(weights)
+
+
+def predict_ultralytics_on_items(
+    model_path: str,
+    items: list[dict],
+    args: argparse.Namespace,
+    *,
+    imgsz: int | None = None,
+    engine: str = "auto",
+) -> tuple[list[dict], float]:
+    from tqdm import tqdm
+
+    predict_imgsz = int(imgsz if imgsz is not None else args.imgsz)
+    model = load_ultralytics_model(model_path, engine=engine)
     predictions: list[dict] = []
     started = time.perf_counter()
     for item in tqdm(items, desc=f"Predict {Path(model_path).name}"):
         result = model.predict(
             source=str(item["image_path"]),
-            imgsz=args.imgsz,
+            imgsz=predict_imgsz,
             conf=args.pred_conf,
             iou=args.nms_iou,
             device=args.device,
@@ -1049,8 +1079,11 @@ def run_detector_train(args: argparse.Namespace) -> None:
     from ultralytics import YOLO
 
     output_dir = expand_path(args.output_dir)
-    summary = load_conversion_summary(args)
-    data_yaml = args.external_data_yaml or summary["data_yaml"]
+    if args.external_data_yaml:
+        data_yaml = str(expand_path(args.external_data_yaml))
+    else:
+        summary = load_conversion_summary(args)
+        data_yaml = summary["data_yaml"]
     model = YOLO(args.yolo_model)
     name = args.run_name or Path(args.yolo_model).stem
     train_dir = output_dir / "runs" / "detector_train"
@@ -1118,6 +1151,66 @@ def run_detector_train(args: argparse.Namespace) -> None:
     write_csv(train_dir / name / "detector_train_metrics.csv", rows)
     summary_out = {"run_dir": str(train_dir / name), "best_weights": str(best_weights), "results_type": str(type(result)), "metrics": rows}
     write_text(train_dir / name / "detector_train_summary.json", json.dumps(summary_out, indent=2))
+    print(json.dumps(summary_out, indent=2))
+
+
+def run_detector_train_rtdetr(args: argparse.Namespace) -> None:
+    from ultralytics import RTDETR
+
+    output_dir = expand_path(args.output_dir)
+    if args.external_data_yaml:
+        data_yaml = str(expand_path(args.external_data_yaml))
+    else:
+        summary = load_conversion_summary(args)
+        data_yaml = summary["data_yaml"]
+    name = args.run_name or "rtdetr_l"
+    train_dir = output_dir / "runs" / "rtdetr"
+    model = RTDETR(args.rtdetr_model)
+    model.train(
+        data=data_yaml,
+        imgsz=args.rtdetr_imgsz,
+        epochs=args.epochs,
+        batch=args.batch,
+        device=args.device,
+        workers=args.workers,
+        project=str(train_dir),
+        name=name,
+        exist_ok=True,
+        patience=args.patience,
+        seed=args.seed,
+    )
+    best_weights = train_dir / name / "weights" / "best.pt"
+    rows = []
+    eval_model = RTDETR(str(best_weights if best_weights.exists() else args.rtdetr_model))
+    for split in ["val", "test"]:
+        metrics = eval_model.val(
+            data=data_yaml,
+            imgsz=args.rtdetr_imgsz,
+            batch=args.batch,
+            device=args.device,
+            split=split,
+            workers=args.workers,
+        )
+        rows.append(
+            {
+                "model": name,
+                "split": split,
+                "weights": str(best_weights),
+                "imgsz": args.rtdetr_imgsz,
+                "precision": float(metrics.box.mp),
+                "recall": float(metrics.box.mr),
+                "mAP50": float(metrics.box.map50),
+                "mAP50_95": float(metrics.box.map),
+            }
+        )
+    write_csv(train_dir / name / "rtdetr_train_metrics.csv", rows)
+    summary_out = {
+        "run_dir": str(train_dir / name),
+        "best_weights": str(best_weights),
+        "data_yaml": data_yaml,
+        "metrics": rows,
+    }
+    write_text(train_dir / name / "rtdetr_train_summary.json", json.dumps(summary_out, indent=2))
     print(json.dumps(summary_out, indent=2))
 
 
@@ -1321,6 +1414,7 @@ def load_paper_eval_models(args: argparse.Namespace, output_dir: Path) -> list[d
                 "weights": expand_path(weights),
                 "imgsz": int(row.get("imgsz", args.imgsz)),
                 "batch": int(row.get("batch", args.batch)),
+                "engine": str(row.get("engine", "auto")),
                 "notes": str(row.get("notes", "")),
             }
         )
@@ -1559,8 +1653,6 @@ def write_markdown_summary(path: Path, rows: list[dict], skipped: list[dict]) ->
 
 def run_paper_unified_eval(args: argparse.Namespace) -> None:
     """Re-evaluate saved YOLO checkpoints with one evaluator and save paper-ready plots."""
-    from ultralytics import YOLO
-
     output_dir = expand_path(args.output_dir)
     run_dir = output_dir / "runs" / "paper_unified_eval"
     figure_dir = run_dir / "figures"
@@ -1586,7 +1678,7 @@ def run_paper_unified_eval(args: argparse.Namespace) -> None:
             continue
 
         print(f"Evaluating {config['model']} from {weights}")
-        model = YOLO(str(weights))
+        model = load_ultralytics_model(str(weights), engine=config.get("engine", "auto"))
         for split in ["val", "test"]:
             metrics = model.val(
                 data=str(data_yaml),
@@ -1675,7 +1767,7 @@ def run_paper_unified_eval(args: argparse.Namespace) -> None:
         test_items = load_yolo_items_from_data_yaml(data_yaml, "test")
         selected = select_visual_example_items(test_items, args.prediction_save_limit)
         if selected:
-            model = YOLO(best_test["weights"])
+            model = load_ultralytics_model(best_test["weights"], engine=best_test.get("engine", "auto"))
             qualitative_name = f"qualitative_examples_{best_test['model']}"
             model.predict(
                 source=[str(item["image_path"]) for item in selected],
@@ -1828,15 +1920,23 @@ def run_adaptive_fusion(args: argparse.Namespace) -> None:
     output_dir = expand_path(args.output_dir)
     if not args.rtdetr_weights:
         raise SystemExit("--rtdetr-weights is required for adaptive fusion")
-    summary = load_conversion_summary(args)
-    yolo_root = Path(summary["yolo_root"])
     run_dir = output_dir / "runs" / "adaptive_fusion"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    val_items = load_yolo_dataset_items(yolo_root, "val")
-    test_items = load_yolo_dataset_items(yolo_root, "test")
-    val_yolo, _ = predict_ultralytics_on_items(args.yolo_weights, val_items, args)
-    val_transformer, _ = predict_ultralytics_on_items(args.rtdetr_weights, val_items, args)
+    if args.external_data_yaml:
+        data_yaml = expand_path(args.external_data_yaml)
+        val_items = load_yolo_items_from_data_yaml(data_yaml, "val")
+        test_items = load_yolo_items_from_data_yaml(data_yaml, "test")
+    else:
+        yolo_root = resolve_yolo_root_for_items(args)
+        val_items = load_yolo_dataset_items(yolo_root, "val")
+        test_items = load_yolo_dataset_items(yolo_root, "test")
+    yolo_imgsz = args.yolo_imgsz if args.yolo_imgsz is not None else args.imgsz
+    rtdetr_imgsz = args.rtdetr_imgsz if args.rtdetr_imgsz is not None else 640
+    val_yolo, _ = predict_ultralytics_on_items(args.yolo_weights, val_items, args, imgsz=yolo_imgsz, engine="yolo")
+    val_transformer, _ = predict_ultralytics_on_items(
+        args.rtdetr_weights, val_items, args, imgsz=rtdetr_imgsz, engine="rtdetr"
+    )
     policy = learn_adaptive_policy(val_items, val_yolo, val_transformer, args)
     write_text(run_dir / "adaptive_defect_aware_policy.json", json.dumps(policy, indent=2))
     write_csv(
@@ -1844,8 +1944,10 @@ def run_adaptive_fusion(args: argparse.Namespace) -> None:
         [{"class_name": name, **values} for name, values in policy["classes"].items()],
     )
 
-    test_yolo, yolo_ms = predict_ultralytics_on_items(args.yolo_weights, test_items, args)
-    test_transformer, transformer_ms = predict_ultralytics_on_items(args.rtdetr_weights, test_items, args)
+    test_yolo, yolo_ms = predict_ultralytics_on_items(args.yolo_weights, test_items, args, imgsz=yolo_imgsz, engine="yolo")
+    test_transformer, transformer_ms = predict_ultralytics_on_items(
+        args.rtdetr_weights, test_items, args, imgsz=rtdetr_imgsz, engine="rtdetr"
+    )
     fused_preds = [
         wbf_fuse_image(y_pred, t_pred, item["width"], item["height"], policy, args)
         for item, y_pred, t_pred in zip(test_items, test_yolo, test_transformer)
@@ -1855,6 +1957,69 @@ def run_adaptive_fusion(args: argparse.Namespace) -> None:
     metrics.update({"mean_component_ms": yolo_ms + transformer_ms})
     write_csv(prefix.with_name(f"{prefix.name}_metrics.csv"), [metrics])
     print(json.dumps({"policy": policy, "test": metrics}, indent=2))
+
+
+def run_primary_baselines_batch(args: argparse.Namespace) -> None:
+    """Train YOLO11s + RT-DETR on current_pcb_yolo, run adaptive fusion, then batch=1 unified eval."""
+    output_dir = expand_path(args.output_dir)
+    batch_log = output_dir / "primary_baselines_batch_status.json"
+    steps: list[dict] = []
+
+    yolo_name = args.run_name or "yolo11s_1280_current_pcb"
+    rtdetr_name = args.rtdetr_run_name or "rtdetr_l_current_pcb"
+    yolo_weights = output_dir / "runs" / "detector_train" / yolo_name / "weights" / "best.pt"
+    rtdetr_weights = output_dir / "runs" / "rtdetr" / rtdetr_name / "weights" / "best.pt"
+
+    pipeline: list[tuple[str, callable]] = []
+    if not args.skip_detector_train:
+        pipeline.append(("detector_train_yolo11s", run_detector_train))
+    if not args.skip_rtdetr_train:
+        pipeline.append(("detector_train_rtdetr", run_detector_train_rtdetr))
+    if not args.skip_adaptive_fusion:
+        pipeline.append(("adaptive_fusion", run_adaptive_fusion))
+    if not args.skip_paper_unified_eval:
+        pipeline.append(("paper_unified_eval", run_paper_unified_eval))
+
+    for name, fn in pipeline:
+        started = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            if name == "detector_train_yolo11s":
+                train_args = argparse.Namespace(**vars(args))
+                train_args.run_name = yolo_name
+                run_detector_train(train_args)
+            elif name == "detector_train_rtdetr":
+                rtdetr_args = argparse.Namespace(**vars(args))
+                rtdetr_args.run_name = rtdetr_name
+                run_detector_train_rtdetr(rtdetr_args)
+            elif name == "adaptive_fusion":
+                if not yolo_weights.exists():
+                    raise FileNotFoundError(f"Missing YOLO weights for fusion: {yolo_weights}")
+                if not rtdetr_weights.exists():
+                    raise FileNotFoundError(f"Missing RT-DETR weights for fusion: {rtdetr_weights}")
+                fusion_args = argparse.Namespace(**vars(args))
+                fusion_args.yolo_weights = str(yolo_weights)
+                fusion_args.rtdetr_weights = str(rtdetr_weights)
+                fusion_args.yolo_imgsz = args.yolo_imgsz if args.yolo_imgsz is not None else args.imgsz
+                fusion_args.rtdetr_imgsz = args.rtdetr_imgsz if args.rtdetr_imgsz is not None else 640
+                fn(fusion_args)
+            else:
+                fn(args)
+            steps.append({"step": name, "status": "completed", "started": started, "finished": time.strftime("%Y-%m-%d %H:%M:%S")})
+        except Exception as exc:  # noqa: BLE001
+            steps.append(
+                {
+                    "step": name,
+                    "status": "failed",
+                    "started": started,
+                    "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "error": repr(exc),
+                }
+            )
+            write_text(batch_log, json.dumps({"steps": steps}, indent=2))
+            raise
+        write_text(batch_log, json.dumps({"steps": steps}, indent=2))
+    print(json.dumps({"steps": steps, "yolo_weights": str(yolo_weights), "rtdetr_weights": str(rtdetr_weights)}, indent=2))
+
 
 class YoloDetectionDataset:
     def __init__(self, yolo_root: Path, split: str, max_items: int | None = None) -> None:
@@ -2204,6 +2369,8 @@ def build_parser() -> argparse.ArgumentParser:
             "smoke",
             "yolo_smoke",
             "detector_train",
+            "detector_train_rtdetr",
+            "primary_baselines_batch",
             "detector_eval",
             "detector_export",
             "visual_examples",
@@ -2266,6 +2433,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-data-yaml", default=None)
     parser.add_argument("--yolo-weights", default="yolo11n.pt")
     parser.add_argument("--rtdetr-weights", default=None)
+    parser.add_argument("--rtdetr-model", default="rtdetr-l.pt", help="RT-DETR pretrained weights for detector_train_rtdetr.")
+    parser.add_argument("--rtdetr-imgsz", type=int, default=640, help="Image size for RT-DETR train/eval/fusion.")
+    parser.add_argument("--yolo-imgsz", type=int, default=None, help="YOLO image size for adaptive fusion (defaults to --imgsz).")
+    parser.add_argument("--rtdetr-run-name", default=None, help="Run folder name under runs/rtdetr/ for primary_baselines_batch.")
+    parser.add_argument("--skip-detector-train", action="store_true", help="Skip YOLO11s training in primary_baselines_batch.")
+    parser.add_argument("--skip-rtdetr-train", action="store_true", help="Skip RT-DETR training in primary_baselines_batch.")
+    parser.add_argument("--skip-adaptive-fusion", action="store_true", help="Skip adaptive fusion in primary_baselines_batch.")
+    parser.add_argument("--skip-paper-unified-eval", action="store_true", help="Skip unified eval in primary_baselines_batch.")
     parser.add_argument("--export-format", default="onnx")
     parser.add_argument("--export-simplify", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--export-dynamic", action=argparse.BooleanOptionalAction, default=False)
@@ -2284,6 +2459,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         run_yolo_smoke(args)
     elif args.experiment == "detector_train":
         run_detector_train(args)
+    elif args.experiment == "detector_train_rtdetr":
+        run_detector_train_rtdetr(args)
+    elif args.experiment == "primary_baselines_batch":
+        run_primary_baselines_batch(args)
     elif args.experiment == "detector_eval":
         run_detector_eval(args)
     elif args.experiment == "detector_export":

@@ -15,9 +15,9 @@
 
 ## Still Worth Running
 
-1. Faster R-CNN baseline on the current split.
-2. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
-3. No more Nautilus experiments are required for ESCS. Only rerun if a file is missing or a paper reviewer/advisor asks for a specific check.
+1. ~~Faster R-CNN baseline on the current split.~~ Done on Nautilus V100 (May 24, 2026).
+2. **Primary baselines on `current_pcb_yolo`:** batch=1 unified eval, YOLO11s train, RT-DETR-L train, adaptive fusion, full batch=1 re-eval. See `reports/publication/nautilus_primary_baselines_pipeline.sh` and `primary_baseline_protocol.md`.
+3. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
 
 ## Repeatable Export Command
 
