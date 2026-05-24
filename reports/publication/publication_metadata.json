@@ -5,7 +5,11 @@
     "yolo11l_1280_artifact": "local_artifacts/yolo11l_1280_publication_outputs_20260522_092005",
     "yolo11l_1280_onnx_artifact": "local_artifacts/yolo11l_1280_onnx_export_20260522_102315",
     "yolo11l_1280_selected_figures": "local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples",
-    "champion_eval_sweep": "reports/publication/champion_eval_sweep.csv"
+    "champion_eval_sweep": "reports/publication/champion_eval_sweep.csv",
+    "paper_unified_eval_artifact": "local_artifacts/paper_unified_eval_20260524_114254",
+    "paper_unified_eval_metrics": "reports/publication/paper_unified_eval_metrics.csv",
+    "paper_unified_eval_per_class": "reports/publication/paper_unified_eval_per_class.csv",
+    "paper_unified_eval_summary": "reports/publication/paper_unified_eval_summary.md"
   },
   "primary_completed_result": "YOLO11l 1280 test mAP50-95 0.5769",
   "primary_eval_setting": "imgsz=1280, augment=False; 1536 and TTA did not improve test mAP50-95",

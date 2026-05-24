@@ -38,6 +38,7 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 - Hardware and environment table.
 - Training settings table.
 - Model comparison table from `model_comparison.csv`.
+- Unified same-evaluator table from `paper_unified_eval_summary.md`.
 - Champion inference sweep table from `champion_eval_sweep.csv`.
 - Per-class table for YOLO11l 1280 and fusion models.
 - Latency and deployment analysis.
@@ -46,6 +47,7 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 
 - YOLO11l 1280 is the strongest current accuracy result.
 - The 1280/no-TTA champion setting beat 1536 and TTA variants in strict test mAP50-95, so the final detector setting is empirically justified rather than arbitrary.
+- The final unified evaluation confirms that the original YOLO11l 1280 checkpoint remains the best result when all saved YOLO checkpoints are re-evaluated on the same split and evaluator.
 - Fusion improves the precision/recall tradeoff discussion but is not always the highest mAP model.
 - Missing_hole remains easiest; Short/Spur localization is harder under stricter mAP50-95.
 - Discuss 2080 Ti feasibility and why A100 is requested for final high-resolution ablations.

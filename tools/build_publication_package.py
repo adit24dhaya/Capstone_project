@@ -30,6 +30,7 @@ YOLO11L_ONNX = (
 )
 YOLO11L_SELECTED_FIGURES = ROOT / "local_artifacts" / "outputs" / "nautilus" / "runs" / "paper_figures" / "yolo11l_1280_selected_examples"
 CHAMPION_EVAL_SWEEP = REPORT_DIR / "champion_eval_sweep.csv"
+PAPER_UNIFIED_EVAL_ARTIFACT = ROOT / "local_artifacts" / "paper_unified_eval_20260524_114254"
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -271,6 +272,22 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
                 "negative ablation supporting the chosen deployment setting."
             ),
             "",
+            "## Unified Paper Evaluation",
+            "",
+            (
+                "The final unified evaluation artifact is `local_artifacts/paper_unified_eval_20260524_114254/`. "
+                "It re-ran all available YOLO checkpoints on the same converted Current PCB YOLO split with "
+                "the same Ultralytics `model.val` evaluator. No checkpoints were skipped. The paper-ready "
+                "summary is copied to `reports/publication/paper_unified_eval_summary.md`, with full metrics "
+                "in `paper_unified_eval_metrics.csv` and per-class metrics in `paper_unified_eval_per_class.csv`."
+            ),
+            "",
+            (
+                "The unified ranking confirms the original YOLO11l 1280 champion as the final headline model. "
+                "The V100 repeat and low-augmentation refinement support reproducibility but do not exceed the "
+                "champion test mAP50-95. YOLO11m 960 remains the speed/accuracy ablation."
+            ),
+            "",
             "## Important Caveat",
             "",
             (
@@ -282,8 +299,12 @@ def write_results_markdown(comparison_rows: list[dict[str, Any]]) -> None:
             "",
             "- `reports/publication/model_comparison.csv`",
             "- `reports/publication/champion_eval_sweep.csv`",
+            "- `reports/publication/paper_unified_eval_metrics.csv`",
+            "- `reports/publication/paper_unified_eval_per_class.csv`",
+            "- `reports/publication/paper_unified_eval_summary.md`",
             "- `reports/publication/yolo11l_1280_training_summary.csv`",
             "- `reports/publication/yolo11m_960_training_summary.csv`",
+            f"- Final unified artifact: `{PAPER_UNIFIED_EVAL_ARTIFACT.relative_to(ROOT)}/`",
             f"- Local artifact backup: `{YOLO11L_ARTIFACT.relative_to(ROOT)}/`",
             f"- ONNX deployment artifact: `{YOLO11L_ONNX.relative_to(ROOT)}`" if YOLO11L_ONNX.exists() else "- ONNX deployment artifact: pending",
             f"- Selected prediction figures: `{YOLO11L_SELECTED_FIGURES.relative_to(ROOT)}/`" if YOLO11L_SELECTED_FIGURES.exists() else "- Selected prediction figures: pending",
@@ -334,6 +355,7 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 - Hardware and environment table.
 - Training settings table.
 - Model comparison table from `model_comparison.csv`.
+- Unified same-evaluator table from `paper_unified_eval_summary.md`.
 - Champion inference sweep table from `champion_eval_sweep.csv`.
 - Per-class table for YOLO11l 1280 and fusion models.
 - Latency and deployment analysis.
@@ -342,6 +364,7 @@ Write 100-120 words. Lead with YOLO11l @ 1280 (test mAP50 ~0.99, mAP50-95 ~0.58)
 
 - YOLO11l 1280 is the strongest current accuracy result.
 - The 1280/no-TTA champion setting beat 1536 and TTA variants in strict test mAP50-95, so the final detector setting is empirically justified rather than arbitrary.
+- The final unified evaluation confirms that the original YOLO11l 1280 checkpoint remains the best result when all saved YOLO checkpoints are re-evaluated on the same split and evaluator.
 - Fusion improves the precision/recall tradeoff discussion but is not always the highest mAP model.
 - Missing_hole remains easiest; Short/Spur localization is harder under stricter mAP50-95.
 - Discuss 2080 Ti feasibility and why A100 is requested for final high-resolution ablations.
@@ -384,13 +407,14 @@ def write_checklist() -> None:
 - YOLO11l 1280 Nautilus/RTX 2080 Ti result in `local_artifacts/yolo11l_1280_publication_outputs_20260522_092005/`.
 - YOLO11l 1280 ONNX export in `local_artifacts/yolo11l_1280_onnx_export_20260522_102315/`.
 - YOLO11l 1280 champion eval sweep on Nautilus V100, saved in `reports/publication/champion_eval_sweep.csv`; 1280/no-TTA remains best.
+- Final unified same-split/same-evaluator package in `local_artifacts/paper_unified_eval_20260524_114254/`, copied into `reports/publication/paper_unified_eval_*`.
 - Six selected prediction examples in `local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples/`.
 
 ## Still Worth Running
 
 1. Faster R-CNN baseline on the current split.
 2. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
-3. Unified same-workflow evaluation table for all saved YOLO checkpoints, then stop tuning unless it reveals a reproducibility gap.
+3. No more Nautilus experiments are required for ESCS. Only rerun if a file is missing or a paper reviewer/advisor asks for a specific check.
 
 ## Repeatable Export Command
 
@@ -538,6 +562,10 @@ def write_metadata() -> None:
             "yolo11l_1280_onnx_artifact": str(YOLO11L_ONNX_ARTIFACT.relative_to(ROOT)),
             "yolo11l_1280_selected_figures": str(YOLO11L_SELECTED_FIGURES.relative_to(ROOT)),
             "champion_eval_sweep": str(CHAMPION_EVAL_SWEEP.relative_to(ROOT)),
+            "paper_unified_eval_artifact": str(PAPER_UNIFIED_EVAL_ARTIFACT.relative_to(ROOT)),
+            "paper_unified_eval_metrics": "reports/publication/paper_unified_eval_metrics.csv",
+            "paper_unified_eval_per_class": "reports/publication/paper_unified_eval_per_class.csv",
+            "paper_unified_eval_summary": "reports/publication/paper_unified_eval_summary.md",
         },
         "primary_completed_result": "YOLO11l 1280 test mAP50-95 0.5769",
         "primary_eval_setting": "imgsz=1280, augment=False; 1536 and TTA did not improve test mAP50-95",

@@ -22,6 +22,12 @@ On May 24, 2026, the restored YOLO11l 1280 champion checkpoint was re-evaluated 
 
 The sweep is useful for the paper because it shows that simply increasing inference size to 1536 or enabling TTA did not improve strict localization. Use 1280/no-TTA as the headline configuration, and mention the sweep as a negative ablation supporting the chosen deployment setting.
 
+## Unified Paper Evaluation
+
+The final unified evaluation artifact is `local_artifacts/paper_unified_eval_20260524_114254/`. It re-ran all available YOLO checkpoints on the same converted Current PCB YOLO split with the same Ultralytics `model.val` evaluator. No checkpoints were skipped. The paper-ready summary is copied to `reports/publication/paper_unified_eval_summary.md`, with full metrics in `paper_unified_eval_metrics.csv` and per-class metrics in `paper_unified_eval_per_class.csv`.
+
+The unified ranking confirms the original YOLO11l 1280 champion as the final headline model. The V100 repeat and low-augmentation refinement support reproducibility but do not exceed the champion test mAP50-95. YOLO11m 960 remains the speed/accuracy ablation.
+
 ## Important Caveat
 
 Kaggle v16 and Nautilus YOLO11 runs were executed on different GPU environments. Use accuracy metrics for model comparison, and discuss latency as hardware-specific.
@@ -30,8 +36,12 @@ Kaggle v16 and Nautilus YOLO11 runs were executed on different GPU environments.
 
 - `reports/publication/model_comparison.csv`
 - `reports/publication/champion_eval_sweep.csv`
+- `reports/publication/paper_unified_eval_metrics.csv`
+- `reports/publication/paper_unified_eval_per_class.csv`
+- `reports/publication/paper_unified_eval_summary.md`
 - `reports/publication/yolo11l_1280_training_summary.csv`
 - `reports/publication/yolo11m_960_training_summary.csv`
+- Final unified artifact: `local_artifacts/paper_unified_eval_20260524_114254/`
 - Local artifact backup: `local_artifacts/yolo11l_1280_publication_outputs_20260522_092005/`
 - ONNX deployment artifact: `local_artifacts/yolo11l_1280_onnx_export_20260522_102315/outputs/nautilus/runs/detector_train/yolo11l_1280_publication/weights/best.onnx`
 - Selected prediction figures: `local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples/`

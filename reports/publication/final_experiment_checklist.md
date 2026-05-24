@@ -10,13 +10,14 @@
 - YOLO11l 1280 Nautilus/RTX 2080 Ti result in `local_artifacts/yolo11l_1280_publication_outputs_20260522_092005/`.
 - YOLO11l 1280 ONNX export in `local_artifacts/yolo11l_1280_onnx_export_20260522_102315/`.
 - YOLO11l 1280 champion eval sweep on Nautilus V100, saved in `reports/publication/champion_eval_sweep.csv`; 1280/no-TTA remains best.
+- Final unified same-split/same-evaluator package in `local_artifacts/paper_unified_eval_20260524_114254/`, copied into `reports/publication/paper_unified_eval_*`.
 - Six selected prediction examples in `local_artifacts/outputs/nautilus/runs/paper_figures/yolo11l_1280_selected_examples/`.
 
 ## Still Worth Running
 
 1. Faster R-CNN baseline on the current split.
 2. Optional cross-dataset test if DeepPCB/DsPCBSD+/Mendeley YOLO data is ready.
-3. Unified same-workflow evaluation table for all saved YOLO checkpoints, then stop tuning unless it reveals a reproducibility gap.
+3. No more Nautilus experiments are required for ESCS. Only rerun if a file is missing or a paper reviewer/advisor asks for a specific check.
 
 ## Repeatable Export Command
 
