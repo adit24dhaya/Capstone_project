@@ -20,6 +20,22 @@ META_DIR = WORK / "pcb_yolo_prepared_upload"
 YOLO_ROOT = Path("/kaggle/temp/YOLO_PCB")
 INPUT_ROOT = Path("/kaggle/input")
 
+RAW_PCB_CANDIDATES = [
+    Path("/kaggle/input/datasets/aditya2402/pcb-dataset/PCB-DATASET-master"),
+    Path("/kaggle/input/pcb-dataset/PCB-DATASET-master"),
+]
+
+
+def find_raw_pcb_dataset() -> Path | None:
+    for candidate in RAW_PCB_CANDIDATES:
+        if (candidate / "images").exists() and (candidate / "Annotations").exists():
+            return candidate
+    if INPUT_ROOT.exists():
+        for candidate in INPUT_ROOT.rglob("PCB-DATASET-master"):
+            if (candidate / "images").exists() and (candidate / "Annotations").exists():
+                return candidate
+    return None
+
 
 def find_existing_zip() -> Path | None:
     if ZIP_PATH.exists():
@@ -83,14 +99,24 @@ elif yolo_root is not None:
 elif ZIP_PATH.exists():
     print(f"Using existing: {ZIP_PATH}")
 else:
-    raise FileNotFoundError(
-        "No YOLO_PCB found.\n"
-        "Fix (pick one):\n"
-        "  1) In THIS notebook run kaggle_kernel/step1_yolo_pcb_prep_paste.py first, OR\n"
-        "  2) Add Data → upload yolo_pcb_dataset.zip from your earlier run, OR\n"
-        "  3) Re-open the notebook where prep finished (5551 train) and run publish there.\n"
-        "  /kaggle/temp is EMPTY in every new notebook until prep runs again."
-    )
+    raw = find_raw_pcb_dataset()
+    msg = "No prepared YOLO_PCB or yolo_pcb_dataset.zip found.\n\n"
+    if raw is not None:
+        msg += (
+            f"You attached RAW pcb-dataset at:\n  {raw}\n\n"
+            "That is NOT the prepared split (5551 train). It is only the Ding XML dataset.\n\n"
+            "In THIS notebook, run ONE cell with the full file:\n"
+            "  step1_yolo_pcb_prep_paste.py\n"
+            "(Internet ON, ~15 min) — then re-run this publish cell.\n"
+        )
+    else:
+        msg += (
+            "Fix (pick one):\n"
+            "  1) Add Data → aditya2402/pcb-dataset + run step1_yolo_pcb_prep_paste.py, OR\n"
+            "  2) Add Data → upload yolo_pcb_dataset.zip from your earlier notebook, OR\n"
+            "  3) Run publish in the notebook where prep already finished (do not restart kernel).\n"
+        )
+    raise FileNotFoundError(msg)
 
 size_mb = ZIP_PATH.stat().st_size / (1024 * 1024)
 print(f"Ready to publish: {ZIP_PATH} ({size_mb:.1f} MiB)")
