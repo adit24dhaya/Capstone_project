@@ -31,7 +31,7 @@ python tools/run_nautilus_experiments.py \
   --epochs 50 \
   --batch 12 \
   --device 0 \
-  --workers 4 \
+  --workers 0 \
   --output-dir "$OUTPUT_DIR" \
   --run-name yolo11s_1280_kaggle_fair \
   2>&1 | tee "$LOG_DIR/yolo11s_kaggle_fair.log"
@@ -53,7 +53,7 @@ model.train(
     epochs=10,
     batch=4,
     device=0,
-    workers=4,
+    workers=0,
     project=str(out.parent),
     name=out.name,
     exist_ok=True,
