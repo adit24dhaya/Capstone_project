@@ -1,0 +1,5 @@
+#!/bin/sh
+# Prevent Cursor agent from being linked on GitHub via commit trailers.
+tmp=$(mktemp)
+grep -v '^Co-authored-by: Cursor' "$1" | grep -v 'cursoragent@cursor.com' | grep -v '^Made-with: Cursor' > "$tmp"
+mv "$tmp" "$1"
