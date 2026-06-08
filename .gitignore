@@ -1,5 +1,6 @@
 .DS_Store
 __pycache__/
+.venv/
 *.py[cod]
 .ipynb_checkpoints/
 
@@ -23,6 +24,7 @@ graphify-out/
 
 # Large local Kaggle dataset download
 data/
+/Dataset/
 
 # Generated Kaggle/local outputs
 kaggle_output/
@@ -47,6 +49,7 @@ reports/cursor_report_context.md
 # Local report documents; keep capstone writing drafts off GitHub
 reports/*.docx
 reports/figures/
+/Report to professor/
 
 # Generated report drafts
 reports/Capstone_Report_Draft.docx

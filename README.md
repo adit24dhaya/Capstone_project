@@ -2,6 +2,31 @@
 
 This project implements an end-to-end PCB defect detection workflow aligned with the capstone proposal and survey paper. It uses Kaggle GPU to prepare the PCB defect dataset, train an object detector, evaluate defect localization/classification metrics, measure inference latency, and export deployment artifacts.
 
+## Online Deployment
+
+Live demo: [Automated PCB Defect Detection on Hugging Face Spaces](https://adiivd-pcb-defect-detection.hf.space)
+
+The deployed Gradio app accepts clean PCB inspection images, runs the trained YOLO detector, and returns an annotated image, per-class counts, an inspection verdict, a detection table, and downloadable image/JSON/CSV outputs. The web demo satisfies the online deployment requirement for the capstone project. Jetson/TensorRT benchmarking is not claimed because target hardware access was unavailable.
+
+The screenshots below were generated from the live Hugging Face Space using clean raw images from `Dataset/PCB-DATASET-master/images/` and different confidence/NMS slider settings.
+
+| Example | Confidence | NMS IoU | Image size | Detections | Top classes |
+|---|---:|---:|---:|---:|---|
+| Missing Hole | 0.25 | 0.45 | 1280 | 3 | Missing_hole: 3 |
+| Mouse Bite | 0.35 | 0.45 | 1280 | 2 | Mouse_bite: 2 |
+| Open Circuit | 0.45 | 0.50 | 1280 | 3 | Open_circuit: 3 |
+| Short | 0.50 | 0.45 | 1280 | 3 | Short: 3 |
+| Spur | 0.25 | 0.50 | 1280 | 2 | Spur: 2 |
+| Spurious Copper | 0.25 | 0.45 | 1280 | 4 | Spurious_copper: 3, Missing_hole: 1 |
+
+![Missing hole deployment result](docs/deployment/missing_hole_space_result.jpg)
+
+![Open circuit deployment result](docs/deployment/open_circuit_space_result.jpg)
+
+![Spurious copper deployment result](docs/deployment/spurious_copper_space_result.jpg)
+
+Additional deployment screenshots are stored in [`docs/deployment/`](docs/deployment/), including all six defect classes and the generated settings table.
+
 ## Project Goals
 
 - Detect six PCB defect classes: mouse bite, spur, open circuit, short, missing hole, and spurious copper.
@@ -27,6 +52,8 @@ This project implements an end-to-end PCB defect detection workflow aligned with
 - `tools/build_publication_package.py` - builds lightweight ESCS paper tables and writing notes from saved artifacts.
 - `k8s/` - Nautilus Kubernetes Job templates for long GPU runs.
 - `reports/publication/` - paper-ready summaries, result tables, and final experiment checklist.
+- `online_deployment/` - Hugging Face Spaces Gradio app for browser-based PCB defect detection.
+- `docs/deployment/` - deployment screenshots generated from the live Space with varied slider settings.
 - `PROJECT_ALIGNMENT.md` - mapping between proposal requirements and implementation.
 
 ## Dataset

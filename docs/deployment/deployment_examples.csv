@@ -1,0 +1,7 @@
+example,source_image,confidence,nms_iou,image_size,detections,classes,screenshot
+Missing Hole,Dataset/PCB-DATASET-master/images/Missing_hole/01_missing_hole_01.jpg,0.25,0.45,1280,3,Missing_hole: 3,docs/deployment/missing_hole_space_result.jpg
+Mouse Bite,Dataset/PCB-DATASET-master/images/Mouse_bite/01_mouse_bite_01.jpg,0.35,0.45,1280,2,Mouse_bite: 2,docs/deployment/mouse_bite_space_result.jpg
+Open Circuit,Dataset/PCB-DATASET-master/images/Open_circuit/01_open_circuit_01.jpg,0.45,0.5,1280,3,Open_circuit: 3,docs/deployment/open_circuit_space_result.jpg
+Short,Dataset/PCB-DATASET-master/images/Short/01_short_01.jpg,0.5,0.45,1280,3,Short: 3,docs/deployment/short_space_result.jpg
+Spur,Dataset/PCB-DATASET-master/images/Spur/01_spur_01.jpg,0.25,0.5,1280,2,Spur: 2,docs/deployment/spur_space_result.jpg
+Spurious Copper,Dataset/PCB-DATASET-master/images/Spurious_copper/01_spurious_copper_01.jpg,0.25,0.45,1280,4,"Spurious_copper: 3, Missing_hole: 1",docs/deployment/spurious_copper_space_result.jpg

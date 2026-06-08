@@ -1,0 +1,6 @@
+gradio>=5.0,<6.0
+huggingface-hub<1.0
+ultralytics>=8.3
+pillow>=10.0
+onnxruntime>=1.18
+pyaudioop>=0.2.0; python_version >= "3.13"
