@@ -44,9 +44,9 @@ COLORS = {
     "Spurious_copper": "#56B4E9",
 }
 
-MODEL_LABEL = os.environ.get("MODEL_LABEL", "YOLO11l")
+MODEL_LABEL = os.environ.get("MODEL_LABEL", "YOLO11s")
 DEFAULT_IMGSZ = int(os.environ.get("DEFAULT_IMGSZ", "1280"))
-BENCHMARK_MS = os.environ.get("BENCHMARK_MS", "30.7")
+BENCHMARK_MS = os.environ.get("BENCHMARK_MS", "12.8")
 STUDENT_NAME = os.environ.get("STUDENT_NAME", "Aditya Dhayapulay")
 INSTITUTION = os.environ.get("INSTITUTION", "California State University, Fullerton")
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "aditdhayapulay@gmail.com")
@@ -57,7 +57,7 @@ REFERENCE_METRICS = {
     "test_map50": "0.902",
     "test_map50_95": "0.502",
     "test_recall": "0.866",
-    "gpu_latency_ms": BENCHMARK_MS,
+    "v100_inference_ms": BENCHMARK_MS,
 }
 
 APP_CSS = """
@@ -1032,7 +1032,7 @@ This Hugging Face Space is the **online deployment artifact** for the CSUF maste
 
 ### Reference offline metrics
 
-These numbers come from the saved YOLO_PCB unified evaluation used in the capstone report. Space latency will differ from offline GPU benchmarks.
+These numbers come from the saved YOLO_PCB unified evaluation used in the capstone report. Space latency will differ from the offline V100 GPU benchmark.
 
 | Metric | Value |
 |---|---|
@@ -1040,7 +1040,7 @@ These numbers come from the saved YOLO_PCB unified evaluation used in the capsto
 | Test mAP50 | {REFERENCE_METRICS['test_map50']} |
 | Test mAP50-95 | {REFERENCE_METRICS['test_map50_95']} |
 | Test recall | {REFERENCE_METRICS['test_recall']} |
-| Offline GPU latency target | {REFERENCE_METRICS['gpu_latency_ms']} ms/image |
+| V100 batch-1 inference latency | {REFERENCE_METRICS['v100_inference_ms']} ms/image |
 
 ### Defect classes
 

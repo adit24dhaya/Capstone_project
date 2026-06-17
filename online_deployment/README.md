@@ -31,8 +31,16 @@ The trained model artifacts are included in:
 - `models/best.pt`
 - `models/best.onnx`
 
-The app loads `models/best.pt` by default. It also supports setting a custom model path with
-the `MODEL_PATH` environment variable.
+The current Space uses the paper-backed YOLO11s-1280 checkpoint from the accepted ESCS'26
+experiments. The app loads `models/best.pt` by default. It also supports setting a custom
+model path with the `MODEL_PATH` environment variable.
+
+Reference offline test metrics for this deployed checkpoint:
+
+- mAP50: `0.902`
+- mAP50-95: `0.502`
+- recall: `0.866`
+- V100 batch-1 inference latency: `12.8 ms/image`
 
 ## Classes
 

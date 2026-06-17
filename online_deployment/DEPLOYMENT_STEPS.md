@@ -14,9 +14,9 @@ be used by setting `MODEL_PATH=models/best.onnx`.
 
 Optional Space environment variables:
 
-- `MODEL_LABEL` (default: `YOLO11l`)
+- `MODEL_LABEL` (default: `YOLO11s`)
 - `DEFAULT_IMGSZ` (default: `1280`)
-- `BENCHMARK_MS` (default: `30.7`)
+- `BENCHMARK_MS` (default: `12.8`)
 - `STUDENT_NAME`, `INSTITUTION`, `CONTACT_EMAIL`
 
 ## 2. Test Locally
@@ -63,6 +63,7 @@ Use this wording:
 ```text
 The trained PCB defect detector was deployed as an online Gradio web demo. The demo accepts
 uploaded PCB images and returns annotated defect predictions with confidence scores.
+The deployed Space uses the YOLO11s-1280 checkpoint evaluated in the accepted ESCS'26 paper.
 ```
 
 Do not claim:
