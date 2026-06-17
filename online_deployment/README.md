@@ -44,12 +44,12 @@ Reference offline test metrics for this deployed checkpoint:
 
 ## Classes
 
-- Missing_hole
-- Mouse_bite
-- Open_circuit
+- Missing hole
+- Mouse bite
+- Open circuit
 - Short
 - Spur
-- Spurious_copper
+- Spurious copper
 
 ## Deployment Note
 
@@ -60,6 +60,9 @@ work because target hardware/runtime access was unavailable.
 ## Input Image Note
 
 Use clean PCB images for the demo. The bundled sample buttons use raw images from
-`PCB-DATASET-master/images/<class>/`. Do not upload YOLO training/validation batch mosaics,
-screenshots, or images that already contain filenames, class labels, or drawn boxes. Text and
-overlay labels are out-of-distribution visual noise and can create false positives near letters.
+`PCB-DATASET-master/images/<class>/`. You can also browse the public
+[PCB-DATASET image folders](https://github.com/Ironbrotherstyle/PCB-DATASET/tree/master/images)
+and upload a clean raw `.jpg` from an `images/<class>/` folder. Do not upload YOLO
+training/validation batch mosaics, screenshots, or images that already contain filenames,
+class labels, or drawn boxes. Text and overlay labels are out-of-distribution visual noise
+and can create false positives near letters.

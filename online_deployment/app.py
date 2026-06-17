@@ -44,6 +44,14 @@ COLORS = {
     "Spurious_copper": "#56B4E9",
 }
 
+CLASS_DISPLAY_NAMES = {
+    class_name: class_name.replace("_", " ") for class_name in CLASS_NAMES.values()
+}
+DISPLAY_TO_CLASS = {display: class_name for class_name, display in CLASS_DISPLAY_NAMES.items()}
+CLASS_FILTER_CHOICES = list(CLASS_DISPLAY_NAMES.values())
+DATASET_IMAGE_URL = "https://github.com/Ironbrotherstyle/PCB-DATASET/tree/master/images"
+DATASET_REPO_URL = "https://github.com/Ironbrotherstyle/PCB-DATASET"
+
 MODEL_LABEL = os.environ.get("MODEL_LABEL", "YOLO11s")
 DEFAULT_IMGSZ = int(os.environ.get("DEFAULT_IMGSZ", "1280"))
 BENCHMARK_MS = os.environ.get("BENCHMARK_MS", "12.8")
@@ -585,7 +593,7 @@ def render_verdict(rows: list[dict]) -> str:
             "No defect candidates above the selected threshold."
             "</div>"
         )
-    classes = sorted({row["class"].replace("_", " ") for row in rows})
+    classes = sorted({display_class_name(row["class"]) for row in rows})
     class_text = ", ".join(classes[:4])
     if len(classes) > 4:
         class_text += f" (+{len(classes) - 4} more)"
@@ -595,6 +603,21 @@ def render_verdict(rows: list[dict]) -> str:
         f"({escape(class_text)})."
         "</div>"
     )
+
+
+def display_class_name(class_name: str) -> str:
+    return CLASS_DISPLAY_NAMES.get(str(class_name), str(class_name).replace("_", " "))
+
+
+def canonical_class_name(class_name: str) -> str:
+    raw_name = str(class_name)
+    if raw_name in CLASS_DISPLAY_NAMES:
+        return raw_name
+    return DISPLAY_TO_CLASS.get(raw_name, raw_name.replace(" ", "_"))
+
+
+def canonical_class_filter(class_filter: list[str] | None) -> set[str]:
+    return {canonical_class_name(class_name) for class_name in (class_filter or [])}
 
 
 def render_hero() -> str:
@@ -631,7 +654,7 @@ def draw_detections(image: Image.Image, rows: list[dict]) -> Image.Image:
 
     for row in rows:
         x1, y1, x2, y2 = row["x1"], row["y1"], row["x2"], row["y2"]
-        label = f"{row['class']} {row['confidence']:.2f}"
+        label = f"{display_class_name(row['class'])} {row['confidence']:.2f}"
         color = COLORS.get(row["class"], "#FF0000")
 
         draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
@@ -705,7 +728,7 @@ def render_metric_cards(
 def render_class_legend() -> str:
     items = []
     for class_name, color in COLORS.items():
-        label = class_name.replace("_", " ")
+        label = display_class_name(class_name)
         items.append(
             f'<div class="legend-item"><span class="legend-swatch" style="background:{color}"></span>{escape(label)}</div>'
         )
@@ -723,7 +746,7 @@ def render_class_breakdown(rows: list[dict]) -> str:
         count = counts.get(class_name, 0)
         width = int((count / max_count) * 100) if max_count else 0
         color = COLORS.get(class_name, "#999999")
-        label = class_name.replace("_", " ")
+        label = display_class_name(class_name)
         bars.append(
             f"""
             <div class="bar-row">
@@ -738,7 +761,8 @@ def render_class_breakdown(rows: list[dict]) -> str:
 
 def render_detection_preview(rows: list[dict], class_filter: list[str] | None = None) -> str:
     if class_filter:
-        rows = [row for row in rows if row["class"] in class_filter]
+        allowed_classes = canonical_class_filter(class_filter)
+        rows = [row for row in rows if canonical_class_name(row["class"]) in allowed_classes]
 
     if not rows:
         return '<div class="empty-preview">No defect candidates above the selected threshold.</div>'
@@ -750,7 +774,7 @@ def render_detection_preview(rows: list[dict], class_filter: list[str] | None = 
 
     for row in visible_rows:
         cells = [
-            escape(str(row["class"])),
+            escape(display_class_name(row["class"])),
             f"{row['confidence']:.3f}",
             f"{row['x1']:.1f}",
             f"{row['y1']:.1f}",
@@ -799,8 +823,10 @@ def write_download_artifacts(rows: list[dict], annotated: Image.Image | None) ->
 
     payload = {
         "model": MODEL_LABEL,
-        "classes": list(CLASS_NAMES.values()),
-        "detections": rows,
+        "classes": CLASS_FILTER_CHOICES,
+        "detections": [
+            {**row, "class": display_class_name(row["class"])} for row in rows
+        ],
         "count": len(rows),
     }
     json_path = str(download_dir / f"pcb_detections_{run_id}.json")
@@ -810,7 +836,7 @@ def write_download_artifacts(rows: list[dict], annotated: Image.Image | None) ->
     csv_lines = ["class,confidence,x1,y1,x2,y2"]
     for row in rows:
         csv_lines.append(
-            f"{row['class']},{row['confidence']:.4f},{row['x1']},{row['y1']},{row['x2']},{row['y2']}"
+            f"{display_class_name(row['class'])},{row['confidence']:.4f},{row['x1']},{row['y1']},{row['x2']},{row['y2']}"
         )
     Path(csv_path).write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
 
@@ -937,7 +963,10 @@ def predict(
     classes_found = len(class_counts)
 
     if rows:
-        top_classes = ", ".join(f"{name}: {count}" for name, count in class_counts.most_common(3))
+        top_classes = ", ".join(
+            f"{display_class_name(name)}: {count}"
+            for name, count in class_counts.most_common(3)
+        )
     else:
         top_classes = "No defect candidates above the selected threshold"
 
@@ -1001,7 +1030,7 @@ def load_sample_inputs(sample_file: str):
         raise gr.Error(f"Sample image not found: {sample_file}")
     image = Image.open(sample_file).convert("RGB")
     image = resize_for_browser(image)
-    return image, 0.25, 0.45, DEFAULT_IMGSZ, list(CLASS_NAMES.values())
+    return image, 0.25, 0.45, DEFAULT_IMGSZ, CLASS_FILTER_CHOICES
 
 
 def load_sample_and_detect(sample_file: str):
@@ -1068,6 +1097,8 @@ These numbers come from the saved YOLO_PCB unified evaluation used in the capsto
 ### Reproducibility
 
 Artifacts, metrics tables, and training logs are archived in the project repository and Kaggle/Nautilus export bundles used to build the final ESCS paper tables.
+
+For additional manual tests, use clean raw PCB images from the public [PCB-DATASET image folders]({DATASET_IMAGE_URL}). Avoid annotated mosaics, screenshots, or files with text overlays.
 """
 
 
@@ -1118,8 +1149,8 @@ with gr.Blocks(title="Automated PCB Defect Detection", **blocks_kwargs()) as dem
                         label="Inference image size",
                     )
                     class_filter = gr.CheckboxGroup(
-                        choices=list(CLASS_NAMES.values()),
-                        value=list(CLASS_NAMES.values()),
+                        choices=CLASS_FILTER_CHOICES,
+                        value=CLASS_FILTER_CHOICES,
                         label="Show classes in results table",
                     )
 
@@ -1132,6 +1163,14 @@ with gr.Blocks(title="Automated PCB Defect Detection", **blocks_kwargs()) as dem
                     with gr.Row(elem_id="sample-buttons"):
                         for sample_label, _sample_file in SAMPLE_IMAGES:
                             sample_buttons.append(gr.Button(sample_label))
+                    gr.Markdown(
+                        (
+                            "Need more test images? Browse the public "
+                            f"[PCB-DATASET image folders]({DATASET_IMAGE_URL}) and upload a clean "
+                            "raw `.jpg` from an `images/<class>/` folder."
+                        ),
+                        elem_id="dataset-link",
+                    )
 
                     gr.HTML(render_class_legend())
 
