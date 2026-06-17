@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pcb-rtdetr-highres-runtime-prep
+  namespace: csuf-titans
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: pcb-rtdetr-highres-runtime-prep
+    spec:
+      restartPolicy: Never
+      priorityClassName: opportunistic
+      containers:
+        - name: prepare
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              root=/workspace/resolution-control
+              env_dir="$root/python-env-v2"
+              marker="$env_dir/.resolution-control-v2"
+              if [[ -f "$marker" ]]; then
+                echo "Persistent Python environment is already ready."
+                exit 0
+              fi
+              rm -rf "$env_dir"
+              python -m venv --system-site-packages "$env_dir"
+              "$env_dir/bin/python" -m pip install \
+                "ultralytics==8.4.51" \
+                "numpy==1.26.4" \
+                "opencv-python-headless==4.10.0.84" \
+                pandas matplotlib pyyaml pillow tqdm
+              "$env_dir/bin/python" -m pip uninstall -y opencv-python
+              "$env_dir/bin/python" -m pip install --force-reinstall --no-deps \
+                "opencv-python-headless==4.10.0.84"
+              "$env_dir/bin/python" -c \
+                "import cv2, torch, ultralytics; print('Runtime imports verified', torch.__version__, cv2.__version__)"
+              touch "$marker"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: pcb-rtdetr-highres-resume-workspace
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values: [Tesla-V100-SXM2-32GB]

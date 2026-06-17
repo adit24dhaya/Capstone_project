@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pcb-yolo-finalizer
+  namespace: csuf-titans
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - Tesla-V100-SXM2-32GB
+      containers:
+        - name: finalizer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["/bin/bash", "/repo/reports/publication/nautilus_yolo_finalizer.sh"]
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: repo
+              mountPath: /repo
+              readOnly: true
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: pcb-publication-workspace
+        - name: repo
+          configMap:
+            name: pcb-resolution-control-finalizer
+            items:
+              - key: nautilus_yolo_finalizer.sh
+                path: reports/publication/nautilus_yolo_finalizer.sh
+              - key: run_nautilus_experiments.py
+                path: tools/run_nautilus_experiments.py
+              - key: generate_resolution_control_examples.py
+                path: tools/generate_resolution_control_examples.py
+              - key: prepare_resolution_control_dataset.py
+                path: tools/prepare_resolution_control_dataset.py
+              - key: build_resolution_control_manifest.py
+                path: tools/build_resolution_control_manifest.py
+  podFailurePolicy:
+    rules:
+      - action: FailJob
+        onExitCodes:
+          containerName: finalizer
+          operator: NotIn
+          values: [0]

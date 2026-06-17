@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pcb-resolution-control
+  namespace: csuf-titans
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: pcb-resolution-control
+    spec:
+      restartPolicy: Never
+      priorityClassName: opportunistic
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              exec /workspace/repo/reports/publication/nautilus_resolution_control_pipeline.sh
+          env:
+            - name: WORKSPACE
+              value: /workspace
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "42"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 48Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 48Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: dshm
+              mountPath: /dev/shm
+            - name: kaggle-token
+              mountPath: /secrets/kaggle
+              readOnly: true
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: pcb-publication-workspace
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: kaggle-token
+          secret:
+            secretName: kaggle-access-token
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - Tesla-V100-SXM2-32GB

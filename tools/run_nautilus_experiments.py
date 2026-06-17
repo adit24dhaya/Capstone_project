@@ -1084,46 +1084,58 @@ def run_detector_train(args: argparse.Namespace) -> None:
     else:
         summary = load_conversion_summary(args)
         data_yaml = summary["data_yaml"]
-    model = YOLO(args.yolo_model)
     name = args.run_name or Path(args.yolo_model).stem
     train_dir = output_dir / "runs" / "detector_train"
-    train_kwargs = {
-        "data": data_yaml,
-        "imgsz": args.imgsz,
-        "epochs": args.epochs,
-        "batch": args.batch,
-        "device": args.device,
-        "workers": args.workers,
-        "project": str(train_dir),
-        "name": name,
-        "exist_ok": True,
-        "patience": args.patience,
-        "cos_lr": args.cos_lr,
-        "cache": args.cache,
-        "close_mosaic": args.close_mosaic,
-        "seed": args.seed,
-    }
-    optional_train_args = {
-        "optimizer": args.optimizer,
-        "lr0": args.lr0,
-        "lrf": args.lrf,
-        "weight_decay": args.weight_decay,
-        "warmup_epochs": args.warmup_epochs,
-        "mosaic": args.mosaic,
-        "mixup": args.mixup,
-        "copy_paste": args.copy_paste,
-        "degrees": args.degrees,
-        "translate": args.translate,
-        "scale": args.scale,
-        "fliplr": args.fliplr,
-        "erasing": args.erasing,
-        "dropout": args.dropout,
-        "freeze": args.freeze,
-    }
-    train_kwargs.update({key: value for key, value in optional_train_args.items() if value is not None})
-    result = model.train(
-        **train_kwargs,
-    )
+    resume_checkpoint = expand_path(args.resume_checkpoint) if args.resume_checkpoint else None
+    if resume_checkpoint and not resume_checkpoint.is_file():
+        raise FileNotFoundError(f"YOLO resume checkpoint not found: {resume_checkpoint}")
+
+    model = YOLO(str(resume_checkpoint) if resume_checkpoint else args.yolo_model)
+    if resume_checkpoint:
+        print(f"Resuming YOLO training from {resume_checkpoint}")
+        result = model.train(resume=True)
+    else:
+        train_kwargs = {
+            "data": data_yaml,
+            "imgsz": args.imgsz,
+            "epochs": args.epochs,
+            "batch": args.batch,
+            "device": args.device,
+            "workers": args.workers,
+            "project": str(train_dir),
+            "name": name,
+            "exist_ok": True,
+            "patience": args.patience,
+            "cos_lr": args.cos_lr,
+            "cache": args.cache,
+            "close_mosaic": args.close_mosaic,
+            "seed": args.seed,
+        }
+        optional_train_args = {
+            "optimizer": args.optimizer,
+            "lr0": args.lr0,
+            "lrf": args.lrf,
+            "weight_decay": args.weight_decay,
+            "warmup_epochs": args.warmup_epochs,
+            "mosaic": args.mosaic,
+            "mixup": args.mixup,
+            "copy_paste": args.copy_paste,
+            "degrees": args.degrees,
+            "translate": args.translate,
+            "scale": args.scale,
+            "fliplr": args.fliplr,
+            "erasing": args.erasing,
+            "dropout": args.dropout,
+            "freeze": args.freeze,
+        }
+        train_kwargs.update(
+            {
+                key: value
+                for key, value in optional_train_args.items()
+                if value is not None
+            }
+        )
+        result = model.train(**train_kwargs)
     best_weights = train_dir / name / "weights" / "best.pt"
     rows = []
     eval_model = YOLO(str(best_weights if best_weights.exists() else args.yolo_model))
@@ -1165,20 +1177,28 @@ def run_detector_train_rtdetr(args: argparse.Namespace) -> None:
         data_yaml = summary["data_yaml"]
     name = args.run_name or "rtdetr_l"
     train_dir = output_dir / "runs" / "rtdetr"
-    model = RTDETR(args.rtdetr_model)
-    model.train(
-        data=data_yaml,
-        imgsz=args.rtdetr_imgsz,
-        epochs=args.epochs,
-        batch=args.batch,
-        device=args.device,
-        workers=args.workers,
-        project=str(train_dir),
-        name=name,
-        exist_ok=True,
-        patience=args.patience,
-        seed=args.seed,
-    )
+    resume_checkpoint = expand_path(args.resume_checkpoint) if args.resume_checkpoint else None
+    if resume_checkpoint and not resume_checkpoint.is_file():
+        raise FileNotFoundError(f"RT-DETR resume checkpoint not found: {resume_checkpoint}")
+
+    model = RTDETR(str(resume_checkpoint) if resume_checkpoint else args.rtdetr_model)
+    if resume_checkpoint:
+        print(f"Resuming RT-DETR training from {resume_checkpoint}")
+        model.train(resume=True)
+    else:
+        model.train(
+            data=data_yaml,
+            imgsz=args.rtdetr_imgsz,
+            epochs=args.epochs,
+            batch=args.batch,
+            device=args.device,
+            workers=args.workers,
+            project=str(train_dir),
+            name=name,
+            exist_ok=True,
+            patience=args.patience,
+            seed=args.seed,
+        )
     best_weights = train_dir / name / "weights" / "best.pt"
     rows = []
     eval_model = RTDETR(str(best_weights if best_weights.exists() else args.rtdetr_model))
@@ -1702,6 +1722,12 @@ def run_paper_unified_eval(args: argparse.Namespace) -> None:
                 "augment": args.paper_eval_augment,
                 "precision": float(metrics.box.mp),
                 "recall": float(metrics.box.mr),
+                "f1": (
+                    2.0 * float(metrics.box.mp) * float(metrics.box.mr)
+                    / (float(metrics.box.mp) + float(metrics.box.mr))
+                    if float(metrics.box.mp) + float(metrics.box.mr) > 0
+                    else 0.0
+                ),
                 "mAP50": float(metrics.box.map50),
                 "mAP50_95": float(metrics.box.map),
                 **speed,
@@ -1722,6 +1748,7 @@ def run_paper_unified_eval(args: argparse.Namespace) -> None:
         "augment",
         "precision",
         "recall",
+        "f1",
         "mAP50",
         "mAP50_95",
         "preprocess_ms",
@@ -2434,6 +2461,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yolo-weights", default="yolo11n.pt")
     parser.add_argument("--rtdetr-weights", default=None)
     parser.add_argument("--rtdetr-model", default="rtdetr-l.pt", help="RT-DETR pretrained weights for detector_train_rtdetr.")
+    parser.add_argument("--resume-checkpoint", default=None, help="Resume YOLO or RT-DETR training from an Ultralytics last.pt checkpoint.")
     parser.add_argument("--rtdetr-imgsz", type=int, default=640, help="Image size for RT-DETR train/eval/fusion.")
     parser.add_argument("--yolo-imgsz", type=int, default=None, help="YOLO image size for adaptive fusion (defaults to --imgsz).")
     parser.add_argument("--rtdetr-run-name", default=None, help="Run folder name under runs/rtdetr/ for primary_baselines_batch.")

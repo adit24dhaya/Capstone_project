@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pcb-resolution-control-final-workspace
+  namespace: csuf-titans
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: rook-ceph-block-fullerton
+  volumeName: pvc-74d3be00-c40e-4a74-a644-345d6582bb80
+  resources:
+    requests:
+      storage: 100Gi

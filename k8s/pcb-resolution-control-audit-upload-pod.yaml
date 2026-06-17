@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pcb-yolo640-audit-upload
+  namespace: csuf-titans
+spec:
+  restartPolicy: Never
+  containers:
+    - name: upload
+      image: alpine:3.20
+      command: ["/bin/sh", "-c", "sleep 86400"]
+      resources:
+        requests:
+          cpu: "100m"
+          memory: 128Mi
+        limits:
+          cpu: "500m"
+          memory: 512Mi
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: pcb-yolo640-audit-workspace

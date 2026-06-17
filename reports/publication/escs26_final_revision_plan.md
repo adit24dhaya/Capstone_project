@@ -16,47 +16,37 @@ Status: Accepted as a Regular Research Paper for ESCS'26 / CSCE'26.
 | Conference | July 20-23, 2026 | Present at CSCE'26 / ESCS'26. |
 | Final paper upload | Around September 10, 2026 | Springer sends upload link; upload final version within about two weeks. |
 
-## Current PDF Audit
+## Current Manuscript Audit
 
 - PDF file reviewed: `/Users/adiiii/Desktop/escs26_yolo_pcb_submission.pdf`
-- Current page count: 7 pages.
+- Accepted PDF page count: 7 pages.
 - Regular paper limit from acceptance email: maximum 15 pages.
-- The paper already contains the key limitation in Section 6: YOLO11s is evaluated at 1280 px and RT-DETR-L at 640 px, so the comparison is a practical-configuration comparison rather than a controlled architecture-only ablation.
-- The paper already states V100 latency is not embedded-device latency.
-- The main final-version task is to strengthen these caveats so the reviewer request is unmistakably addressed.
+- The LNCS camera-ready source preserves the accepted practical comparison and explicitly identifies YOLO11s-1280 versus RT-DETR-L-640 as not resolution controlled.
+- Separate matched-resolution YOLO11s-640 and RT-DETR-L-640 experiments were completed.
+- RT-DETR-L-1280 completed for 10 epochs at batch size 1 on a V100-SXM2-32GB; the 960-pixel fallback was not required.
+- The manuscript states that matched resolution is not the same as equal training compute, memory, latency, FLOPs, or model capacity.
+- The manuscript states that V100 latency is not embedded-device latency and makes no Jetson or TensorRT performance claim.
 
-## Must-Fix Before Final Upload
+## Completed Camera-Ready Work
 
-1. Confirm contact email.
-   - Current PDF lists `adivd@csu.fullerton.edu`.
-   - If this is not correct, replace it with `aditdhayapulay@gmail.com` or the correct institutional address.
+1. The matched 640-pixel experiments were collected into CSV records and merged into `reports/publication/resolution_control_results/merged_controlled/`.
+2. The success and failure figures were copied into `reports/publication/camera_ready_figures/`.
+3. Manuscript tables and numeric macros are rendered from saved CSV files through `tools/render_resolution_control_tables.py`.
+4. The LNCS PDF build is checked by `tools/build_escs26_camera_ready.sh`, including the 15-page limit, placeholder detection, and unverified embedded-claim guard.
+5. The reviewer response and compliance audit document how the manuscript addresses the resolution-control and embedded-benchmarking comments.
+6. The source retains the active institutional address `adivd@csu.fullerton.edu`; change it only if Dr. Inventado requests a different publication contact.
 
-2. Add one explicit sentence to the abstract.
-   - Current abstract says both models are compared on the same split, but the reviewer may still expect the input-size caveat up front.
-   - Suggested sentence:
+## Remaining Admin Items
 
-   `Because YOLO11s and RT-DETR-L were evaluated using the completed project configurations available at 1280 px and 640 px respectively, the comparison should be interpreted as a same-split practical-configuration benchmark rather than an input-resolution-controlled architectural ablation.`
+- Email `cs@american-cse.org` with the virtual presentation selection by June 21, 2026, if confirmation has not already been sent.
+- Coordinate registration funding with Dr. Inventado before the June 23, 2026 deadline.
+- Upload the Springer camera-ready paper only after the official Springer link arrives, expected around September 10, 2026.
 
-3. Strengthen Section 5 Discussion after the paragraph that mentions scale.
-   - Suggested paragraph:
+## Implemented Reviewer Changes
 
-   `The resolution difference is an important interpretation caveat. YOLO11s was evaluated at 1280 px to preserve small PCB defect detail, whereas RT-DETR-L was evaluated at 640 px because that was the completed saved training/evaluation configuration available for the transformer-style benchmark. Higher input resolution can improve localization of small objects, so part of YOLO11s' advantage may reflect the resolution setting as well as the detector family. The result therefore supports YOLO11s-1280 as the stronger completed deployment-oriented configuration in this study, but it should not be read as a fully resolution-matched proof that the YOLO architecture is always superior to RT-DETR for PCB inspection.`
-
-4. Strengthen Section 6 Limitations.
-   - Suggested replacement/addition:
-
-   `A resolution-controlled comparison remains future work. The present study intentionally reports completed project configurations: YOLO11s at 1280 px and RT-DETR-L at 640 px. A stricter architectural ablation would train and evaluate both detectors across matched input sizes, or compare them under a resource-normalized budget such as equal latency, equal memory, or equal FLOPs. Such an experiment would separate architecture effects from the benefits of higher spatial resolution.`
-
-5. Strengthen future work on embedded deployment without overclaiming.
-   - Suggested sentence for Conclusion:
-
-   `Because the authors did not have access to Jetson/TensorRT hardware during this revision, target-device benchmarking is left as future work; the current latency results should be reported only as V100 batch-1 measurements.`
-
-## Optional Improvements
-
-- Convert the final version to a Springer LNCS template before final upload if the portal requests it.
-- Add a short "Response to reviewer comments" note for the advisor:
-  - We clarified that YOLO11s-1280 vs RT-DETR-L-640 is not input-size-controlled.
-  - We explained why RT-DETR-L used 640 px.
-  - We added matched-resolution/resource-normalized comparisons as future work.
-  - We clarified that embedded target benchmarking remains future work.
+- The camera-ready source uses the Springer LNCS class.
+- The abstract, Methods, Results, Discussion, and Limitations distinguish the accepted practical configurations from the matched-resolution comparison.
+- The paper adds the requested matched-resolution experiment rather than leaving it only as future work.
+- RT-DETR-L was also tested at 1280 pixels to answer the advisor's question directly.
+- Resource-normalized comparison remains future work and is stated as a limitation.
+- Embedded target benchmarking remains future work.

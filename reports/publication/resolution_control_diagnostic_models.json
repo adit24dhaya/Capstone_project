@@ -1,0 +1,10 @@
+[
+  {
+    "model": "YOLO11s_existing_checkpoint_at_640",
+    "weights": "/workspace/checkpoints/yolo11s_1280_kaggle_fair_best.pt",
+    "imgsz": 640,
+    "batch": 1,
+    "engine": "yolo",
+    "notes": "Evaluation-only diagnostic; checkpoint was trained at 1280"
+  }
+]

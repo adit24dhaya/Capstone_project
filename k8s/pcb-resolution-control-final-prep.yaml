@@ -1,0 +1,97 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pcb-resolution-control-final-prep
+  namespace: csuf-titans
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: pcb-resolution-control-final-prep
+    spec:
+      restartPolicy: Never
+      priorityClassName: opportunistic
+      containers:
+        - name: prepare
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              root=/workspace/resolution-control
+              env_dir="$root/python-env-v2"
+              marker="$env_dir/.resolution-control-v2"
+              mkdir -p "$root/raw" "$root/data" /root/.kaggle
+
+              if [[ ! -f "$marker" ]]; then
+                rm -rf "$env_dir"
+                python -m venv --system-site-packages "$env_dir"
+                "$env_dir/bin/python" -m pip install --no-cache-dir \
+                  "stringzilla==3.12.6" \
+                  "simsimd==6.2.1"
+                "$env_dir/bin/python" -m pip install --no-cache-dir \
+                  "ultralytics==8.4.51" \
+                  "kaggle==2.1.0" \
+                  "numpy==1.26.4" \
+                  "opencv-python-headless==4.10.0.84" \
+                  "albumentations==2.0.8" \
+                  pandas matplotlib scikit-learn pyyaml pillow tqdm
+                "$env_dir/bin/python" -m pip uninstall -y opencv-python || true
+                "$env_dir/bin/python" -m pip install --force-reinstall --no-deps \
+                  "opencv-python-headless==4.10.0.84"
+                "$env_dir/bin/python" -c \
+                  "import cv2, torch, ultralytics; print('Runtime verified', torch.__version__, cv2.__version__)"
+                touch "$marker"
+              fi
+
+              export PATH="$env_dir/bin:$PATH"
+              cp /secrets/kaggle/access_token /root/.kaggle/access_token
+              chmod 600 /root/.kaggle/access_token
+
+              if [[ ! -d "$root/raw/PCB-DATASET-master/Annotations" ]]; then
+                kaggle datasets download \
+                  -d aditya2402/pcb-dataset \
+                  -p "$root/raw" \
+                  --unzip
+              fi
+
+              for mode in corrected legacy; do
+                output="$root/data/YOLO_PCB_${mode}"
+                if [[ ! -f "$output/data.yaml" ]]; then
+                  "$env_dir/bin/python" \
+                    /repo/tools/prepare_resolution_control_dataset.py \
+                    --base-root "$root/raw" \
+                    --cache-dir "$root/raw/cache" \
+                    --output "$output" \
+                    --label-mode "$mode"
+                fi
+              done
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: tools
+              mountPath: /repo/tools
+              readOnly: true
+            - name: kaggle-token
+              mountPath: /secrets/kaggle
+              readOnly: true
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: pcb-resolution-control-final-workspace
+        - name: tools
+          configMap:
+            name: pcb-resolution-control-tools
+            defaultMode: 0555
+        - name: kaggle-token
+          secret:
+            secretName: kaggle-access-token

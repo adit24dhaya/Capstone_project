@@ -1,0 +1,26 @@
+[
+  {
+    "model": "YOLO11s_640_matched",
+    "weights": "/workspace/resolution-control/outputs/runs/detector_train/yolo11s_640_matched/weights/best.pt",
+    "imgsz": 640,
+    "batch": 1,
+    "engine": "yolo",
+    "notes": "Corrected canonical labels; 50 epochs; seed 42"
+  },
+  {
+    "model": "RTDETR_L_640_matched",
+    "weights": "/workspace/resolution-control/outputs/runs/rtdetr/rtdetr_l_640_matched/weights/best.pt",
+    "imgsz": 640,
+    "batch": 1,
+    "engine": "rtdetr",
+    "notes": "Corrected canonical labels; 10 epochs; seed 42"
+  },
+  {
+    "model": "RTDETR_L_high_resolution",
+    "weights": "/workspace/resolution-control/outputs/runs/rtdetr/rtdetr_l_high_resolution/weights/best.pt",
+    "imgsz": 1280,
+    "batch": 1,
+    "engine": "rtdetr",
+    "notes": "1280 preferred; runtime manifest records a 960 fallback only after confirmed CUDA OOM"
+  }
+]

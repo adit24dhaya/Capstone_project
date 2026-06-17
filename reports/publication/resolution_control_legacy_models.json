@@ -1,0 +1,18 @@
+[
+  {
+    "model": "YOLO11s_1280",
+    "weights": "/workspace/checkpoints/yolo11s_1280_kaggle_fair_best.pt",
+    "imgsz": 1280,
+    "batch": 1,
+    "engine": "yolo",
+    "notes": "Accepted practical-configuration baseline; legacy class-ID layout"
+  },
+  {
+    "model": "RTDETR_L_640",
+    "weights": "/workspace/checkpoints/rtdetr_l_kaggle_fair_best.pt",
+    "imgsz": 640,
+    "batch": 1,
+    "engine": "rtdetr",
+    "notes": "Accepted practical-configuration baseline; legacy class-ID layout"
+  }
+]

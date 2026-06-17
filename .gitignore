@@ -46,6 +46,22 @@ _gallery/
 reports/claude_handoff_context.md
 reports/cursor_report_context.md
 
+# Private conference correspondence and funding drafts
+reports/publication/communications/
+reports/publication/escs26_acceptance_email.txt
+reports/publication/*.aux
+reports/publication/*.bbl
+reports/publication/*.blg
+reports/publication/*.log
+reports/publication/*.out
+reports/publication/*.toc
+reports/publication/escs26_AVD.pdf
+
+# Bulky local experiment exports; keep only curated merged CSVs in Git
+reports/publication/resolution_control_results/*
+!reports/publication/resolution_control_results/merged_controlled/
+!reports/publication/resolution_control_results/merged_controlled/*.csv
+
 # Local report documents; keep capstone writing drafts off GitHub
 reports/*.docx
 reports/figures/

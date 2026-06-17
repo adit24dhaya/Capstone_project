@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pcb-yolo640-audit
+  namespace: csuf-titans
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: pcb-yolo640-audit
+    spec:
+      restartPolicy: Never
+      priorityClassName: opportunistic
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command:
+            - /bin/bash
+            - /repo/reports/publication/nautilus_yolo_audit_worker.sh
+          env:
+            - name: WORKSPACE
+              value: /workspace
+            - name: REPO
+              value: /repo
+            - name: PYTHONHASHSEED
+              value: "42"
+            - name: HOLD_FOR_COLLECTION
+              value: "1"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 32Gi
+              ephemeral-storage: 20Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 32Gi
+              ephemeral-storage: 40Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: dshm
+              mountPath: /dev/shm
+            - name: yolo-scripts
+              mountPath: /repo/reports/publication
+              readOnly: true
+            - name: tools
+              mountPath: /repo/tools
+              readOnly: true
+            - name: kaggle-token
+              mountPath: /secrets/kaggle
+              readOnly: true
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: pcb-resolution-control-final-workspace
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: yolo-scripts
+          configMap:
+            name: pcb-yolo640-audit-scripts
+            defaultMode: 0555
+        - name: tools
+          configMap:
+            name: pcb-resolution-control-tools
+            defaultMode: 0555
+        - name: kaggle-token
+          secret:
+            secretName: kaggle-access-token
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values: [Tesla-V100-SXM2-32GB]
