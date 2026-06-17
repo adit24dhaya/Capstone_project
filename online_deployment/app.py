@@ -47,10 +47,19 @@ COLORS = {
 CLASS_DISPLAY_NAMES = {
     class_name: class_name.replace("_", " ") for class_name in CLASS_NAMES.values()
 }
-DISPLAY_TO_CLASS = {display: class_name for class_name, display in CLASS_DISPLAY_NAMES.items()}
 CLASS_FILTER_CHOICES = list(CLASS_DISPLAY_NAMES.values())
 DATASET_IMAGE_URL = "https://github.com/Ironbrotherstyle/PCB-DATASET/tree/master/images"
-DATASET_REPO_URL = "https://github.com/Ironbrotherstyle/PCB-DATASET"
+
+
+def _class_lookup_key(class_name: str) -> str:
+    return str(class_name).strip().replace("_", " ").casefold()
+
+
+CLASS_ALIAS_TO_CANONICAL = {
+    _class_lookup_key(alias): class_name
+    for class_name, display in CLASS_DISPLAY_NAMES.items()
+    for alias in (class_name, display)
+}
 
 MODEL_LABEL = os.environ.get("MODEL_LABEL", "YOLO11s")
 DEFAULT_IMGSZ = int(os.environ.get("DEFAULT_IMGSZ", "1280"))
@@ -333,7 +342,8 @@ html, body, .gradio-container {
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
-    table-layout: fixed;
+    min-width: 640px;
+    table-layout: auto;
 }
 
 #detection-preview th {
@@ -345,13 +355,25 @@ html, body, .gradio-container {
     top: 0;
     text-align: left;
     z-index: 1;
+    white-space: nowrap;
 }
 
 #detection-preview td {
     border-bottom: 1px solid #e6eee9;
     color: #17251f;
     padding: 8px;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+    white-space: nowrap;
+}
+
+#detection-preview th:nth-child(1),
+#detection-preview td:nth-child(1) {
+    min-width: 128px;
+}
+
+#detection-preview th:nth-child(2),
+#detection-preview td:nth-child(2) {
+    min-width: 96px;
 }
 
 #detection-preview tr:nth-child(even) td { background: #f5faf7; }
@@ -394,6 +416,7 @@ html, body, .gradio-container {
 #sample-buttons button, #action-row button {
     min-height: 38px !important;
     border-radius: 9px !important;
+    user-select: none !important;
 }
 
 #sample-buttons button {
@@ -430,6 +453,30 @@ button.primary:hover {
 .muted-note * {
     color: #31443c !important;
     opacity: 1 !important;
+}
+
+#dataset-link {
+    background: #eef7f2 !important;
+    border: 1px solid #cfe3d9 !important;
+    border-radius: 10px !important;
+    color: #17352f !important;
+    font-size: 13px !important;
+    line-height: 1.45 !important;
+    margin: 10px 0 10px !important;
+    padding: 10px 12px !important;
+}
+
+#dataset-link,
+#dataset-link * {
+    color: #17352f !important;
+    opacity: 1 !important;
+}
+
+#dataset-link a {
+    color: #0f766e !important;
+    font-weight: 800 !important;
+    text-decoration: underline !important;
+    text-underline-offset: 2px;
 }
 
 .about-panel h3 {
@@ -606,14 +653,15 @@ def render_verdict(rows: list[dict]) -> str:
 
 
 def display_class_name(class_name: str) -> str:
-    return CLASS_DISPLAY_NAMES.get(str(class_name), str(class_name).replace("_", " "))
+    canonical = CLASS_ALIAS_TO_CANONICAL.get(_class_lookup_key(class_name))
+    if canonical:
+        return CLASS_DISPLAY_NAMES[canonical]
+    return str(class_name).replace("_", " ")
 
 
 def canonical_class_name(class_name: str) -> str:
-    raw_name = str(class_name)
-    if raw_name in CLASS_DISPLAY_NAMES:
-        return raw_name
-    return DISPLAY_TO_CLASS.get(raw_name, raw_name.replace(" ", "_"))
+    raw_name = str(class_name).strip()
+    return CLASS_ALIAS_TO_CANONICAL.get(_class_lookup_key(raw_name), raw_name.replace(" ", "_"))
 
 
 def canonical_class_filter(class_filter: list[str] | None) -> set[str]:
@@ -671,9 +719,9 @@ def draw_detections(image: Image.Image, rows: list[dict]) -> Image.Image:
 def class_name_for(model: YOLO, class_id: int) -> str:
     names = getattr(model, "names", {})
     if isinstance(names, dict):
-        return names.get(class_id, CLASS_NAMES.get(class_id, str(class_id)))
+        return canonical_class_name(names.get(class_id, CLASS_NAMES.get(class_id, str(class_id))))
     if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
-        return str(names[class_id])
+        return canonical_class_name(str(names[class_id]))
     return CLASS_NAMES.get(class_id, str(class_id))
 
 
@@ -1163,13 +1211,15 @@ with gr.Blocks(title="Automated PCB Defect Detection", **blocks_kwargs()) as dem
                     with gr.Row(elem_id="sample-buttons"):
                         for sample_label, _sample_file in SAMPLE_IMAGES:
                             sample_buttons.append(gr.Button(sample_label))
-                    gr.Markdown(
+                    gr.HTML(
                         (
+                            '<div id="dataset-link">'
                             "Need more test images? Browse the public "
-                            f"[PCB-DATASET image folders]({DATASET_IMAGE_URL}) and upload a clean "
-                            "raw `.jpg` from an `images/<class>/` folder."
-                        ),
-                        elem_id="dataset-link",
+                            f'<a href="{DATASET_IMAGE_URL}" target="_blank" rel="noopener noreferrer">'
+                            "PCB-DATASET image folders</a> and upload a clean raw JPG from an "
+                            "images/class folder."
+                            "</div>"
+                        )
                     )
 
                     gr.HTML(render_class_legend())
