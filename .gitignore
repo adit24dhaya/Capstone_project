@@ -82,6 +82,30 @@ tools/build_report_docx.py
 
 # Secrets and local credentials
 .env
+.env.*
+!.env.example
 .kaggle/
 kaggle.json
 access_token
+.hf/
+.huggingface/
+.kube/
+kubeconfig
+kubeconfig.*
+*credentials*.json
+*service-account*.json
+*secret*.yaml
+*secret*.yml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Presentation build intermediates and duplicate local exports
+reports/presentation/assets/
+reports/presentation/final_assets/
+reports/presentation/final_rendered/
+reports/presentation/demo_video/playwright_video/
+reports/presentation/demo_video/0[1-5]_*.png
+/preseentation/
+/escs26_yolo_pcb_submission.pdf
